@@ -1,0 +1,114 @@
+# Copyright 2024 Canonical Ltd.
+# See LICENSE file for licensing details.
+
+# This file configures Charmcraft.
+# See https://juju.is/docs/sdk/charmcraft-config for guidance.
+
+name: datahub-mcp-k8s
+type: charm
+title: DataHub MCP Server
+summary: A Model Context Protocol server for the DataHub metadata catalog.
+description: |
+  The DataHub MCP server exposes the DataHub metadata catalog to LLM agents over the
+  Model Context Protocol. Agents can search datasets, walk table-level and column-level
+  lineage, read schemas and glossary terms, and inspect the queries that run against a
+  dataset, all grounded in the catalog rather than in the model's training data.
+
+  This charm runs the upstream server as a centrally managed, stateless HTTP endpoint
+  instead of a per-user local process. It integrates with DataHub over a relation that
+  provisions a dedicated read-only service account and its access token, with an ingress
+  provider for a single well-known TLS-terminated URL, and with an identity provider so
+  that callers authenticate with OAuth 2.1 bearer tokens.
+
+  It is intended for data platform teams who want AI-assisted data discovery without
+  handing long-lived catalog tokens to every workstation. It is a component of the
+  Canonical Data Mesh solution.
+
+links:
+  documentation: https://github.com/canonical/canonical-data-mesh-docs
+  source:
+    - https://github.com/canonical/datahub-mcp-k8s-operator
+  issues:
+    - https://github.com/canonical/datahub-mcp-k8s-operator/issues
+
+assumes:
+  - juju >= 3.4
+
+bases:
+  - build-on:
+    - name: ubuntu
+      channel: "22.04"
+      architectures:
+      - amd64
+    run-on:
+    - name: ubuntu
+      channel: "22.04"
+      architectures:
+      - amd64
+
+charm-libs:
+  - lib: data_platform_libs.data_models
+    version: "0"
+  - lib: traefik_k8s.ingress
+    version: "2"
+  - lib: hydra.oauth
+    version: "0"
+  - lib: datahub_k8s.datahub_client
+    version: "0"
+
+parts:
+  charm:
+    plugin: uv
+    source: .
+    uv-groups:
+      - charmlibs-pydeps
+    build-snaps:
+      - astral-uv
+    build-packages:
+      - pkg-config
+      - libffi-dev
+      - libssl-dev
+    prime:
+      - -rock/
+
+peers:
+  peer:
+    interface: datahub-mcp
+
+requires:
+  datahub-client:
+    interface: datahub_client
+    limit: 1
+    optional: false
+
+  ingress:
+    interface: ingress
+    limit: 1
+    optional: true
+
+  oauth:
+    interface: oauth
+    limit: 1
+    optional: true
+
+config:
+  options:
+    enable-mutation-tools:
+      description: |
+        Expose the DataHub mutation tools (tags, glossary terms, owners, domains,
+        descriptions) in addition to the read-only tool set. Every mutation is
+        attributed to the shared service account rather than to the user whose
+        agent made the call, so enabling this gives up write attribution. The
+        service account also needs write privileges granted in DataHub before
+        the tools succeed.
+      type: boolean
+      default: false
+
+containers:
+  mcp-server:
+    resource: datahub-mcp
+
+resources:
+  datahub-mcp:
+    type: oci-image
+    description: OCI image for the DataHub MCP server

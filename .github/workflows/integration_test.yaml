@@ -1,0 +1,30 @@
+name: Integration tests
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+  workflow_call:
+
+jobs:
+  integration-tests:
+    uses: canonical/operator-workflows/.github/workflows/integration_test.yaml@main
+    secrets: inherit
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write
+    with:
+      channel: 1.35-classic/stable
+      provider: k8s
+      use-canonical-k8s: true
+      modules: >-
+        ["test_charm.py",
+        "test_scaling.py",
+        "test_upgrades.py"]'
+      juju-channel: 3/stable
+      trivy-severity-config: CRITICAL
+      self-hosted-runner: false
+      with-uv: true

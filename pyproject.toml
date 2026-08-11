@@ -1,0 +1,111 @@
+# Copyright 2024 Canonical Ltd.
+# See LICENSE file for licensing details.
+
+[project]
+name = "datahub-mcp-k8s-operator"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+dependencies = [
+    "ops>=3.7,<4",
+    "pydantic~=2.8",
+    "jsonschema~=4.23",
+]
+
+[dependency-groups]
+# Dependencies fetched into the packed charm to satisfy PYDEPS of charm libraries.
+charmlibs-pydeps = [
+    "ops>=2.0.0",
+    "pydantic~=2.8",
+    "jsonschema~=4.23",
+]
+
+# Dependencies for linting and formatting.
+lint = [
+    "black==26.3.1",
+    "codespell==2.4.2",
+    "flake8==7.0.0",
+    "flake8-builtins==3.1.0",
+    "flake8-copyright==0.2.4",
+    "flake8-docstrings==1.7.0",
+    "flake8-docstrings-complete==1.4.1",
+    "flake8-test-docs==1.0.8",
+    "isort==8.0.1",
+    "mypy==1.20.1",
+    "pep8-naming==0.15.1",
+    "pydocstyle==6.3.0",
+    "pylint==4.0.5",
+    "pyproject-flake8==7.0.0",
+    "pytest==9.0.3",
+    "types-PyYAML==6.0.12.20260408",
+    "types-requests==2.33.0.20260408",
+]
+
+# Dependencies for static analysis.
+static = [
+    "bandit[toml]==1.9.4",
+]
+
+# Dependencies for unit tests.
+unit = [
+    "coverage[toml]==7.13.5",
+    "ops[testing]",
+    "pytest==9.0.3",
+]
+
+# Dependencies for the rock entrypoint tests, which run the workload's own package.
+serve = [
+    "mcp-server-datahub==0.6.0; python_version >= '3.11'",
+    "pytest==9.0.3",
+    "requests==2.32.3",
+    "respx==0.22.0",
+]
+
+# Dependencies for integration tests.
+integration = [
+    "jubilant==1.8.0",
+    "pytest==9.0.3",
+    "requests==2.32.3",
+]
+
+[tool.bandit]
+exclude_dirs = ["/venv/"]
+[tool.bandit.assert_used]
+skips = ["*/*test.py", "*/test_*.py", "*tests/*.py"]
+
+# Testing tools configuration
+[tool.coverage.run]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+log_cli_level = "INFO"
+
+# Formatting tools configuration
+[tool.black]
+line-length = 120
+target-version = ["py310", "py311", "py312"]
+
+[tool.isort]
+profile = "black"
+
+# Linting tools configuration
+[tool.flake8]
+max-line-length = 120
+max-doc-length = 99
+max-complexity = 10
+exclude = [".git", "__pycache__", ".tox", "build", "dist", "*.egg_info", "venv"]
+select = ["E", "W", "F", "C", "N", "R", "D", "H"]
+# Ignore W503, E501 because using black creates errors with this
+# Ignore D107 Missing docstring in __init__
+ignore = ["W503", "E501", "D107"]
+# D100, D101, D102, D103: Ignore missing docstrings in tests
+per-file-ignores = ["tests/*:D100,D101,D102,D103,D104"]
+docstring-convention = "google"
+# Check for properly formatted copyright header in each file
+copyright-check = "True"
+copyright-author = "Canonical Ltd."
+copyright-regexp = "Copyright\\s\\d{4}([-,]\\d{4})*\\s+%(author)s"
