@@ -1,0 +1,46 @@
+header:
+  license:
+    spdx-id: Apache-2.0
+    copyright-owner: Canonical Ltd.
+    content: |
+      Copyright [year] [owner]
+      See LICENSE file for licensing details.
+    # License year is supposed to be the year where a file is first created.
+    # But the workflow does not check it correctly, so we change the pattern.
+    pattern: |
+      Copyright \d{4} Canonical Ltd.
+      See LICENSE file for licensing details.
+  paths:
+    - '**'
+  paths-ignore:
+    - '.github/files/**'
+    - '**/*.j2'
+    - '**/*.jinja'
+    - '**/*.json'
+    - '**/*.md'
+    - '**/*.txt'
+    - '**/*.xml'
+    - '**/.codespellignore'
+    - '**/.dockerignore'
+    - '**/.flake8'
+    - '**/.jujuignore'
+    - '**/.gitignore'
+    - '**/.licenserc.yaml'
+    - '**/.trivyignore'
+    - '**/.woke.yaml'
+    - '**/.woke.yml'
+    - '**/CODEOWNERS'
+    - '**/icon.svg'
+    - '**/LICENSE'
+    - '**/trivy.yaml'
+    - '.eslintignore'
+    - '.gitattributes'
+    - '.node-version'
+    - '.prettierignore'
+    - 'dist/**'
+    - 'internal/**'
+    - 'tests/workflows/integration/**'
+    - 'uv.lock'
+    - '.python-version'
+    - 'lib/charms/**'
+  comment: on-failure
