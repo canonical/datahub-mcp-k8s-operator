@@ -38,9 +38,13 @@ def pytest_addoption(parser):
     Args:
         parser: The pytest command line parser.
     """
-    parser.addoption("--model", help="Model to test in. A temporary one is created when omitted.")
-    parser.addoption("--charm-file", help="Path to the packed charm.")
-    parser.addoption("--mcp-image", default=DEFAULT_IMAGE, help="OCI image for the workload.")
+    parser.addoption("--charm-file", action="store", default=None, help="Path to the packed charm.")
+    parser.addoption(
+        "--datahub-mcp-image", action="store", default=DEFAULT_IMAGE, help="OCI image for the workload."
+    )
+    parser.addoption("--model", action="store", default=None, help="Model to test in.")
+    parser.addoption("--keep-models", action="store_true", default=False)
+    parser.addoption("--series", action="store", default=None)
 
 
 def unit_message(juju: jubilant.Juju, app: str, unit: int = 0) -> str:
@@ -124,7 +128,7 @@ def mcp_image(request) -> str:
     Returns:
         The image reference.
     """
-    return request.config.getoption("--mcp-image")
+    return request.config.getoption("--datahub-mcp-image")
 
 
 @pytest.fixture(scope="session")

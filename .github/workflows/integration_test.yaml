@@ -23,7 +23,7 @@ jobs:
       modules: >-
         ["test_charm.py",
         "test_scaling.py",
-        "test_upgrades.py"]
+        "test_upgrade.py"]
       juju-channel: 3/stable
       trivy-severity-config: CRITICAL
       self-hosted-runner: false
