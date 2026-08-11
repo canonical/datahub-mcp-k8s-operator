@@ -3,13 +3,10 @@
 
 """Build the pebble layer that runs the DataHub MCP server."""
 
-import logging
 import os
 from typing import Dict
 
 import literals
-
-logger = logging.getLogger(__name__)
 
 
 def compile_environment(charm) -> Dict[str, str]:
@@ -41,8 +38,10 @@ def compile_environment(charm) -> Dict[str, str]:
 def _oauth_environment(charm) -> Dict[str, str]:
     """Build the client-authentication part of the environment.
 
-    Empty when there is no usable oauth relation, which leaves the endpoint
-    unauthenticated and relying on whatever the ingress enforces.
+    Empty when there is no oauth relation at all, which leaves the endpoint
+    unauthenticated and relying on whatever the ingress enforces. A relation
+    that exists but is not usable yet never reaches this point: the charm
+    blocks rather than plan a workload that cannot check a token.
 
     Args:
         charm: The charm to read relation state from.
@@ -51,16 +50,10 @@ def _oauth_environment(charm) -> Dict[str, str]:
         The OAuth environment variables, possibly empty.
     """
     provider = charm.oauth_relation.provider_info
-    if provider is None:
-        return {}
-    if not provider.client_id or not provider.client_secret:
-        logger.info("oauth provider has not issued client credentials yet")
-        return {}
-
-    if not charm.public_url:
-        # Without a public URL there is no protected-resource metadata to
-        # advertise, so clients could not discover where to get a token.
-        logger.info("no public URL yet, leaving client authentication off")
+    # Without a public URL there is no protected-resource metadata to advertise,
+    # so clients could not discover where to get a token.
+    public_url = charm.public_url
+    if provider is None or not charm.oauth_relation.is_ready or not public_url:
         return {}
 
     return {
@@ -74,7 +67,7 @@ def _oauth_environment(charm) -> Dict[str, str]:
         "MCP_AUTH_INTROSPECTION_URL": provider.introspection_endpoint,
         "MCP_AUTH_CLIENT_ID": provider.client_id,
         "MCP_AUTH_CLIENT_SECRET": provider.client_secret,
-        "MCP_AUTH_BASE_URL": charm.public_url.rstrip("/"),
+        "MCP_AUTH_BASE_URL": public_url.rstrip("/"),
     }
 
 

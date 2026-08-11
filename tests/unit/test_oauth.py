@@ -28,13 +28,13 @@ _PROVIDER_DATA = {
 }
 
 
-def _oauth_state(base_state, *, with_ingress=True):
-    """Return the base state plus a fully registered oauth relation."""
+def _oauth_state(base_state, *, with_ingress=True, provider_data=None):
+    """Return the base state plus an oauth relation, registered by default."""
     client_secret = testing.Secret(id=_CLIENT_SECRET_ID, tracked_content={"secret": "mcp-secret"})  # nosec
     oauth = testing.Relation(
         endpoint=literals.OAUTH_RELATION_NAME,
         remote_app_name="idp",
-        remote_app_data=_PROVIDER_DATA,
+        remote_app_data=_PROVIDER_DATA if provider_data is None else provider_data,
     )
     relations = base_state.relations | {oauth}
     if with_ingress:
@@ -52,10 +52,14 @@ def _oauth_state(base_state, *, with_ingress=True):
     )
 
 
+def _layer(state):
+    """Return the pebble layer the charm planned for the workload container."""
+    return state.get_container(literals.CONTAINER_NAME).layers[literals.SERVICE_NAME]
+
+
 def _service_env(state):
     """Return the workload environment the charm planned."""
-    container = state.get_container(literals.CONTAINER_NAME)
-    return container.layers[literals.SERVICE_NAME].services[literals.SERVICE_NAME].environment
+    return _layer(state).services[literals.SERVICE_NAME].environment
 
 
 def test_configures_token_introspection(charm_ctx, base_state):
@@ -85,9 +89,57 @@ def test_publishes_the_client_config_once_the_url_is_known(charm_ctx, base_state
     assert "//oauth" not in oauth.local_app_data["redirect_uri"]
 
 
-def test_client_authentication_survives_relation_removal(charm_ctx, base_state):
+def test_client_authentication_is_dropped_with_the_relation(charm_ctx, base_state):
     """Removing the oauth relation reopens the endpoint rather than blocking."""
-    out = charm_ctx.run(charm_ctx.on.config_changed(), base_state)
+    authenticated = charm_ctx.run(charm_ctx.on.config_changed(), _oauth_state(base_state))
+    assert "MCP_AUTH_INTROSPECTION_URL" in _service_env(authenticated)
+
+    oauth = next(r for r in authenticated.relations if r.endpoint == literals.OAUTH_RELATION_NAME)
+    broken = charm_ctx.run(charm_ctx.on.relation_broken(oauth), authenticated)
+    # The plan written while the relation existed is still on the container, so
+    # the charm has to replan to clear it rather than simply stop writing it.
+    departed = dataclasses.replace(broken, relations=broken.relations - {oauth})
+
+    out = charm_ctx.run(charm_ctx.on.config_changed(), departed)
 
     assert out.unit_status == ops.ActiveStatus()
     assert "MCP_AUTH_INTROSPECTION_URL" not in _service_env(out)
+
+
+class TestUnregisteredProvider:
+    """Tests for an oauth relation the provider has not answered yet."""
+
+    def test_blocks_until_the_client_is_registered(self, charm_ctx, base_state):
+        """Serving here would publish the catalog to anyone who reaches the ingress."""
+        state = _oauth_state(base_state, provider_data={})
+
+        out = charm_ctx.run(charm_ctx.on.config_changed(), state)
+
+        assert isinstance(out.unit_status, ops.BlockedStatus)
+        assert "register" in out.unit_status.message
+
+    def test_blocks_when_the_provider_offers_no_way_to_check_a_token(self, charm_ctx, base_state):
+        """Credentials alone are not enough: something has to verify the token."""
+        without_endpoints = {**_PROVIDER_DATA, "introspection_endpoint": "", "jwks_endpoint": ""}
+        state = _oauth_state(base_state, provider_data=without_endpoints)
+
+        out = charm_ctx.run(charm_ctx.on.config_changed(), state)
+
+        assert isinstance(out.unit_status, ops.BlockedStatus)
+
+    def test_stops_a_workload_that_is_already_serving(self, charm_ctx, base_state):
+        """Relating an IdP must close an endpoint that was open, not leave it open."""
+        running = charm_ctx.run(charm_ctx.on.config_changed(), base_state)
+        serving = testing.Container(
+            name=literals.CONTAINER_NAME,
+            can_connect=True,
+            layers={literals.SERVICE_NAME: _layer(running)},
+            service_statuses={literals.SERVICE_NAME: ops.pebble.ServiceStatus.ACTIVE},
+        )
+        state = _oauth_state(dataclasses.replace(running, containers={serving}), provider_data={})
+
+        out = charm_ctx.run(charm_ctx.on.config_changed(), state)
+
+        assert isinstance(out.unit_status, ops.BlockedStatus)
+        statuses = out.get_container(literals.CONTAINER_NAME).service_statuses
+        assert statuses[literals.SERVICE_NAME] == ops.pebble.ServiceStatus.INACTIVE

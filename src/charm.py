@@ -136,6 +136,7 @@ class DatahubMcpK8SOperatorCharm(TypedCharmBase[CharmConfig]):
         try:
             self._check_state()
         except exceptions.UnreadyStateError as err:
+            self._stop_workload()
             self.unit.status = ops.BlockedStatus(str(err))
             return
 
@@ -171,11 +172,21 @@ class DatahubMcpK8SOperatorCharm(TypedCharmBase[CharmConfig]):
         if self.datahub_relation.connection is None:
             raise exceptions.UnreadyStateError("waiting for DataHub to publish the access token")
 
-        if self.oauth_relation.is_related and not self.public_url:
+        if not self.oauth_relation.is_related:
+            return
+
+        if not self.public_url:
             raise exceptions.UnreadyStateError(
                 "OAuth is enabled but the 'ingress' relation is not ready; "
                 "clients need a public URL to discover the authorization server"
             )
+
+        # Relating an identity provider is how a deployment says its callers must
+        # authenticate. Until the provider has answered with credentials the
+        # workload has no way to check a token, and serving anyway would publish
+        # the catalog to anyone who can reach the ingress.
+        if not self.oauth_relation.is_ready:
+            raise exceptions.UnreadyStateError("waiting for the OAuth provider to register the client")
 
     def reconcile(self) -> None:
         """Reconcile the charm to its desired state.
@@ -185,9 +196,12 @@ class DatahubMcpK8SOperatorCharm(TypedCharmBase[CharmConfig]):
         workload's pebble plan matches.
         """
         try:
-            self._check_state()
+            # Publishing comes first: the provider cannot register the client,
+            # and so cannot become ready, until it has seen the client config.
             self.oauth_relation.publish_client_config()
+            self._check_state()
         except exceptions.UnreadyStateError as err:
+            self._stop_workload()
             self.unit.status = ops.BlockedStatus(str(err))
             return
 
@@ -206,9 +220,17 @@ class DatahubMcpK8SOperatorCharm(TypedCharmBase[CharmConfig]):
             self.unit.status = ops.MaintenanceStatus("replan failed")
             return
 
-        if self.unit.is_leader():
-            self.app.status = ops.ActiveStatus()
         self.unit.status = ops.ActiveStatus()
+
+    def _stop_workload(self) -> None:
+        """Stop the workload, if it is running, because the charm is not ready."""
+        container = self.unit.get_container(literals.CONTAINER_NAME)
+        if not container.can_connect():
+            return
+        services = container.get_services(literals.SERVICE_NAME)
+        if any(service.is_running() for service in services.values()):
+            logger.info("stopping the workload while the charm is not ready to serve")
+            container.stop(literals.SERVICE_NAME)
 
 
 if __name__ == "__main__":  # pragma: nocover

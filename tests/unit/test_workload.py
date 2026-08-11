@@ -31,12 +31,12 @@ PROVIDER = SimpleNamespace(
 )
 
 
-def _charm(*, provider=None, public_url=None, mutations=False):
+def _charm(*, provider=None, public_url=None, mutations=False, oauth_ready=True):
     """Build a stub charm exposing everything workload.py reads."""
     return SimpleNamespace(
         config=SimpleNamespace(enable_mutation_tools=mutations),
         datahub_relation=SimpleNamespace(connection=CONNECTION),
-        oauth_relation=SimpleNamespace(provider_info=provider),
+        oauth_relation=SimpleNamespace(provider_info=provider, is_ready=oauth_ready),
         public_url=public_url,
     )
 
@@ -48,18 +48,11 @@ class TestOauthEnvironment:
         """No relation means no verifier, so the endpoint stays open."""
         assert workload._oauth_environment(_charm()) == {}
 
-    def test_is_empty_until_the_client_is_registered(self):
-        """The provider publishes endpoints before it issues client credentials."""
-        provider = SimpleNamespace(
-            issuer_url="https://idp.example.com",
-            introspection_endpoint="https://idp.example.com/introspect",
-            jwks_endpoint="https://idp.example.com/.well-known/jwks.json",
-            jwt_access_token=False,
-            client_id=None,
-            client_secret=None,
-        )
+    def test_is_empty_until_the_relation_is_usable(self):
+        """A half-published provider must not produce a half-configured verifier."""
+        charm = _charm(provider=PROVIDER, public_url="https://mcp.example.com", oauth_ready=False)
 
-        assert workload._oauth_environment(_charm(provider=provider)) == {}
+        assert workload._oauth_environment(charm) == {}
 
     def test_is_empty_without_a_public_url(self):
         """Clients could not discover the authorization server, so stay open."""

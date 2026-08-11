@@ -15,7 +15,8 @@ BASE_URL = "https://mcp.example.com"
 CLIENT_ID = "datahub-mcp"
 GOOGLE_TOKENINFO = "https://oauth2.googleapis.com/tokeninfo"
 HYDRA_INTROSPECTION = "https://hydra.example.com/admin/oauth2/introspect"
-JWKS_URL = "https://idp.example.com/.well-known/jwks.json"
+ISSUER = "https://idp.example.com"
+JWKS_URL = f"{ISSUER}/.well-known/jwks.json"
 
 
 def _verify(verifier, token="a-token"):  # nosec B107
@@ -70,11 +71,36 @@ class TestVerifierSelection:
 
         assert isinstance(serve._token_verifier(BASE_URL), serve.CheckedIntrospectionVerifier)
 
-    def test_no_way_to_check_leaves_authentication_off(self, oauth_env):
-        """Without an endpoint or signing keys there is nothing to check against."""
-        oauth_env(client_id=CLIENT_ID)
+    @pytest.mark.parametrize(
+        "environment",
+        [
+            # No endpoint and no signing keys: nothing to check a token against.
+            {"client_id": CLIENT_ID},
+            # A provider that signs its tokens but published no key set.
+            {"client_id": CLIENT_ID, "jwt_access_token": "true", "issuer": ISSUER},  # nosec B105
+            # An endpoint to ask, but no credential to ask it with.
+            {"client_id": CLIENT_ID, "introspection_url": HYDRA_INTROSPECTION},
+        ],
+    )
+    def test_a_missing_piece_is_a_startup_failure(self, oauth_env, environment):
+        """Serving unauthenticated is never the answer once auth is configured."""
+        oauth_env(**environment)
 
-        assert serve._token_verifier(BASE_URL) is None
+        with pytest.raises(ValueError):
+            serve._token_verifier(BASE_URL)
+
+    def test_the_provider_fails_rather_than_open_the_endpoint(self, oauth_env):
+        """The entrypoint must not fall back to no authentication at all."""
+        oauth_env(client_id=CLIENT_ID, issuer=ISSUER, base_url=BASE_URL)
+
+        with pytest.raises(ValueError):
+            serve._auth_provider()
+
+    def test_no_issuer_at_all_leaves_authentication_off(self, oauth_env):
+        """Without an oauth relation the charm sets none of these variables."""
+        oauth_env()
+
+        assert serve._auth_provider() is None
 
 
 class TestGoogleAccessTokenVerifier:

@@ -10,7 +10,10 @@ dependency tree, and that refresh and scaling work.
 
 Everything the charm does after DataHub publishes a token is covered by the
 unit tests, which drive the same relation and secret through `ops.testing`, and
-by `tests/serve`, which boots the real workload against a stub GMS.
+by `tests/serve`, which boots the real workload against a stub GMS and calls it
+over HTTP: the MCP transport, the `/health` route behind the pebble check, and
+the 401 path with client authentication on. Reaching that state here instead
+would mean deploying DataHub, and with it Postgres, Kafka and OpenSearch.
 """
 
 import logging
@@ -39,9 +42,7 @@ def pytest_addoption(parser):
         parser: The pytest command line parser.
     """
     parser.addoption("--charm-file", action="store", default=None, help="Path to the packed charm.")
-    parser.addoption(
-        "--datahub-mcp-image", action="store", default=DEFAULT_IMAGE, help="OCI image for the workload."
-    )
+    parser.addoption("--datahub-mcp-image", action="store", default=DEFAULT_IMAGE, help="OCI image for the workload.")
     parser.addoption("--model", action="store", default=None, help="Model to test in.")
     parser.addoption("--keep-models", action="store_true", default=False)
     parser.addoption("--series", action="store", default=None)
@@ -62,18 +63,25 @@ def unit_message(juju: jubilant.Juju, app: str, unit: int = 0) -> str:
 
 
 def blocked_on_datahub(status, app: str = APP_NAME) -> bool:
-    """Return whether every unit is blocked waiting for DataHub.
+    """Return whether every unit has settled, blocked waiting for DataHub.
+
+    This is the healthy resting state for this suite: nothing here provides the
+    required `datahub-client` relation, so `blocked` on that one message is what
+    "converged" looks like. The agent status is part of the check because a unit
+    still running hooks has not converged on anything yet.
 
     Args:
         status: A Juju status object.
         app: Application name.
 
     Returns:
-        True when all units report the expected blocked message.
+        True when every unit is idle and reports the expected blocked message.
     """
     units = status.apps[app].units.values()
     return bool(units) and all(
-        unit.workload_status.current == "blocked" and unit.workload_status.message == NO_DATAHUB_MESSAGE
+        unit.workload_status.current == "blocked"
+        and unit.workload_status.message == NO_DATAHUB_MESSAGE
+        and unit.juju_status.current == "idle"
         for unit in units
     )
 

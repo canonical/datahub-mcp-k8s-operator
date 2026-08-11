@@ -154,17 +154,43 @@ def _uses_google_tokeninfo(introspection_url: str) -> bool:
     return urlparse(introspection_url).hostname == GOOGLE_TOKENINFO_HOST
 
 
-def _token_verifier(base_url: str) -> Optional[TokenVerifier]:
+def _required(name: str) -> str:
+    """Return an environment variable that authentication cannot work without.
+
+    Args:
+        name: Name of the variable.
+
+    Returns:
+        Its value.
+
+    Raises:
+        ValueError: If the variable is unset or empty.
+    """
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(f"client authentication is configured but {name} is not set")
+    return value
+
+
+def _token_verifier(base_url: str) -> TokenVerifier:
     """Build the token check described by the environment.
+
+    Every path out of here either returns a verifier or raises. There is
+    deliberately no "could not build one" return value: the caller has already
+    established that this deployment authenticates its callers, and answering
+    it with nothing would serve the catalog to anyone who can reach the port.
 
     Args:
         base_url: Public base URL of this server.
 
     Returns:
-        A TokenVerifier, or None when the environment describes no way to check
-        a token, which leaves client authentication off.
+        A TokenVerifier.
+
+    Raises:
+        ValueError: If the environment names an issuer but describes no way to
+            check a token against it.
     """
-    client_id = os.environ["MCP_AUTH_CLIENT_ID"]
+    client_id = _required("MCP_AUTH_CLIENT_ID")
     # A token issued for us names either this server or the client it was
     # issued through, depending on what the provider supports.
     audiences = [client_id, base_url]
@@ -173,15 +199,13 @@ def _token_verifier(base_url: str) -> Optional[TokenVerifier]:
     # provider's public keys rather than by asking the provider every time.
     if os.getenv("MCP_AUTH_JWT_ACCESS_TOKEN") == "true":
         return JWTVerifier(
-            jwks_uri=os.environ["MCP_AUTH_JWKS_URL"],
-            issuer=os.environ["MCP_AUTH_ISSUER"],
+            jwks_uri=_required("MCP_AUTH_JWKS_URL"),
+            issuer=_required("MCP_AUTH_ISSUER"),
             audience=audiences,
             base_url=base_url,
         )
 
-    introspection_url = os.getenv("MCP_AUTH_INTROSPECTION_URL")
-    if not introspection_url:
-        return None
+    introspection_url = _required("MCP_AUTH_INTROSPECTION_URL")
 
     if _uses_google_tokeninfo(introspection_url):
         return GoogleAccessTokenVerifier(
@@ -194,13 +218,17 @@ def _token_verifier(base_url: str) -> Optional[TokenVerifier]:
         audiences=audiences,
         introspection_url=introspection_url,
         client_id=client_id,
-        client_secret=os.environ["MCP_AUTH_CLIENT_SECRET"],
+        client_secret=_required("MCP_AUTH_CLIENT_SECRET"),
         base_url=base_url,
     )
 
 
 def _auth_provider():
     """Build the auth provider, including its discovery metadata.
+
+    An issuer with a public base URL is this deployment saying its callers
+    authenticate. From that point on a missing piece is a startup failure, not
+    a reason to open the endpoint: the process exits and pebble reports it.
 
     Returns:
         A RemoteAuthProvider, or None when client authentication is disabled.
@@ -211,8 +239,6 @@ def _auth_provider():
         return None
 
     verifier = _token_verifier(base_url)
-    if verifier is None:
-        return None
 
     # RemoteAuthProvider is what serves the metadata clients read after a 401,
     # so they can discover the identity provider on their own.

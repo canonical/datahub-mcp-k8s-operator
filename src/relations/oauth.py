@@ -35,6 +35,7 @@ class OauthRelation(framework.Object):
         charm: The charm this relation is attached to.
         requirer: The OAuthRequirer instance handling the relation databags.
         is_related: Whether an oauth relation currently exists.
+        is_ready: Whether the provider published a usable way to check a token.
         provider_info: Live provider details or None.
     """
 
@@ -72,6 +73,27 @@ class OauthRelation(framework.Object):
         except (ops.SecretNotFoundError, ops.ModelError) as e:
             logger.info("oauth client secret not accessible yet: %s", e)
             return None
+
+    @property
+    def is_ready(self) -> bool:
+        """Return whether the provider published a usable way to check a token.
+
+        Registration is asynchronous: the relation exists from `juju integrate`,
+        but the credentials and endpoints only arrive once the provider has
+        answered the client config. Until all of it is here the workload has no
+        way to check a caller's token, and the charm must not serve.
+
+        Returns:
+            True when a token verifier can be built from what the provider published.
+        """
+        provider = self.provider_info
+        if provider is None or not provider.client_id or not provider.client_secret:
+            return False
+        # A token is checked either against the provider's signing keys or by
+        # asking the provider; a provider offering neither cannot be used.
+        if provider.jwt_access_token:
+            return bool(provider.jwks_endpoint)
+        return bool(provider.introspection_endpoint)
 
     def publish_client_config(self) -> None:
         """Publish the OAuth client config so the provider can register the client.

@@ -51,6 +51,35 @@ The token never appears in a databag, in charm config, or in the charm's logs. R
 
 The service account is created with no privileges of its own. It inherits DataHub's default all-users policies, which grant metadata **read** and nothing else so the endpoint cannot write to the catalog even if the mutation tools are switched on. If your deployment has narrowed those default policies, grant the service account a read-only metadata policy in DataHub for the MCP tools to return results.
 
+### Authenticating clients
+
+Without an `oauth` relation the endpoint does not authenticate its callers: anyone who can reach the port can call the tools, and it is up to whatever fronts it to decide who that is. Deploy it that way only on a network where that is true.
+
+Relate an identity provider to close it:
+
+```sh
+juju integrate datahub-mcp-k8s nginx-ingress-integrator
+juju integrate datahub-mcp-k8s oauth-external-idp-integrator
+```
+
+Ingress is required alongside it. The server is an OAuth 2.1 **resource server**: it never runs a login flow, it checks the bearer tokens callers already hold, and clients discover where to get one by reading `/.well-known/oauth-protected-resource` at the server's public URL. Without a public URL there is nothing to advertise, so the charm stays `blocked` until the ingress is ready.
+
+Give the endpoint a hostname of its own and serve it at root:
+
+```sh
+juju config nginx-ingress-integrator \
+  service-hostname=mcp.example.com path-routes=/ rewrite-enabled=false
+```
+
+It stays `blocked` until the provider has registered the client too. Serving in that window would leave a public endpoint open, so the charm stops the workload rather than run it unauthenticated.
+
+A user then authenticates as themselves at the identity provider since the MCP client runs the browser flow and presents the resulting token. The charm accepts a token only if the provider confirms it and it was issued for this deployment. What a caller sees in the catalog does not depend on who they are: every call reaches DataHub as the one service account from the `datahub-client` relation. The identity decides whether you may call the server at all, not what it will show you.
+
+Two dialects are supported, chosen from what the provider publishes:
+
+- **signed tokens**, checked locally against the provider's JWKS;
+- **unsigned tokens**, checked by asking the provider: the standard introspection endpoint, or Google's `tokeninfo` endpoint, which is the only way to check a Google token.
+
 ### Mutation tools
 
 The read-only tool set (`search`, `get_lineage`, `get_entities`, `list_schema_fields`, `get_dataset_queries`, `get_lineage_paths_between`) is what the charm serves by default.
