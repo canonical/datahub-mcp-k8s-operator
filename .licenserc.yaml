@@ -13,7 +13,7 @@ header:
   paths:
     - '**'
   paths-ignore:
-    - '.github/files/**'
+    - '.github/**'
     - '**/*.j2'
     - '**/*.jinja'
     - '**/*.json'
