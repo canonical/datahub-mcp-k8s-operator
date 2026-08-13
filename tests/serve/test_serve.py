@@ -102,6 +102,34 @@ class TestVerifierSelection:
 
         assert serve._auth_provider() is None
 
+    def test_the_metadata_names_the_scopes_to_ask_for(self, oauth_env):
+        """A client with nothing to request sends no scope, which Google rejects."""
+        oauth_env(
+            client_id=CLIENT_ID,
+            client_secret="s3cret",  # nosec B106
+            issuer=ISSUER,
+            base_url=BASE_URL,
+            introspection_url=GOOGLE_TOKENINFO,
+        )
+
+        provider = serve._auth_provider()
+
+        assert provider._scopes_supported == ["openid", "profile", "email"]
+
+    def test_the_advertised_scopes_are_not_required_of_a_token(self, oauth_env):
+        """Google reports `email` and `profile` back as URIs, so requiring them rejects valid tokens."""
+        oauth_env(
+            client_id=CLIENT_ID,
+            client_secret="s3cret",  # nosec B106
+            issuer=ISSUER,
+            base_url=BASE_URL,
+            introspection_url=GOOGLE_TOKENINFO,
+        )
+
+        provider = serve._auth_provider()
+
+        assert provider.token_verifier.required_scopes in (None, [])
+
 
 class TestGoogleAccessTokenVerifier:
     """Tests for the Google tokeninfo check."""

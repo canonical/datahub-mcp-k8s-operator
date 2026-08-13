@@ -31,6 +31,9 @@ from mcp_server_datahub.__main__ import create_app
 # Google checks tokens through its own endpoint instead of the standard one.
 GOOGLE_TOKENINFO_HOST = "oauth2.googleapis.com"
 
+# Advertised to clients so they know what to ask the provider for.
+ADVERTISED_SCOPES = ["openid", "profile", "email"]
+
 
 def _audience_matches(claim: Any, expected: List[str]) -> bool:
     """Return whether a token was issued for this deployment.
@@ -246,6 +249,7 @@ def _auth_provider():
         token_verifier=verifier,
         authorization_servers=[issuer],
         base_url=base_url,
+        scopes_supported=ADVERTISED_SCOPES,
         resource_name="DataHub MCP Server",
     )
 
