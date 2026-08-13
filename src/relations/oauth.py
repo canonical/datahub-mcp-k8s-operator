@@ -52,6 +52,19 @@ class OauthRelation(framework.Object):
         # yet; it is published from `reconcile()` once available.
         self.requirer = OAuthRequirer(charm, client_config=None, relation_name=literals.OAUTH_RELATION_NAME)
 
+        # The library's own events only fire once the provider has published
+        # client credentials, and the provider only does that after it sees this
+        # charm's client config. Something has to write that config when the
+        # relation appears, or the two sides wait for each other forever.
+        charm.framework.observe(
+            charm.on[literals.OAUTH_RELATION_NAME].relation_created,
+            self._on_relation_changed,
+        )
+        charm.framework.observe(
+            charm.on[literals.OAUTH_RELATION_NAME].relation_changed,
+            self._on_relation_changed,
+        )
+
         charm.framework.observe(self.requirer.on.oauth_info_changed, self._on_oauth_info_changed)
         charm.framework.observe(self.requirer.on.oauth_info_removed, self._on_oauth_info_removed)
         charm.framework.observe(self.requirer.on.invalid_client_config, self._on_invalid_client_config)
@@ -120,6 +133,15 @@ class OauthRelation(framework.Object):
             self.requirer.update_client_config(client_config)
         except ClientConfigError as e:
             raise exceptions.UnreadyStateError(f"invalid OAuth client config: {e}") from None
+
+    @log_event_handler(logger)
+    def _on_relation_changed(self, event) -> None:
+        """Handle the oauth relation appearing or changing.
+
+        Args:
+            event: The relation-created or relation-changed event.
+        """
+        self.charm.reconcile()
 
     @log_event_handler(logger)
     def _on_oauth_info_changed(self, event) -> None:

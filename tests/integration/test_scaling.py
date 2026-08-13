@@ -16,8 +16,8 @@ def test_scale_out_and_in(juju: jubilant.Juju, mcp_app: str):
     """Every unit reaches the same state, and losing units leaves the rest healthy.
 
     A new unit converging means every unit idle on the same status. Without a
-    DataHub to relate, that status is `blocked` rather than `active`. 
-    The scaling behaviour under test is the same either way: 
+    DataHub to relate, that status is `blocked` rather than `active`.
+    The scaling behaviour under test is the same either way:
     the charm is stateless, so a unit added later must reach exactly what
     the first one reached, from nothing but the model's own state.
     """

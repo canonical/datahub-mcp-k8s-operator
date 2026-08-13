@@ -109,6 +109,32 @@ def test_client_authentication_is_dropped_with_the_relation(charm_ctx, base_stat
 class TestUnregisteredProvider:
     """Tests for an oauth relation the provider has not answered yet."""
 
+    def test_publishes_the_client_config_when_the_relation_appears(self, charm_ctx, base_state):
+        """Relating an IdP to a running deployment must not deadlock.
+
+        The provider only publishes credentials once it has seen this charm's
+        client config, and the library's own events only fire once those
+        credentials exist. Nothing else would break the tie: with the ingress
+        already up, no ingress event follows the relation.
+        """
+        state = _oauth_state(base_state, provider_data={})
+        oauth = next(r for r in state.relations if r.endpoint == literals.OAUTH_RELATION_NAME)
+
+        out = charm_ctx.run(charm_ctx.on.relation_created(oauth), state)
+
+        published = next(r for r in out.relations if r.endpoint == literals.OAUTH_RELATION_NAME)
+        assert literals.OAUTH_CALLBACK_PATH in published.local_app_data["redirect_uri"]
+
+    def test_keeps_publishing_from_update_status(self, charm_ctx, base_state):
+        """A missed relation event must self-heal rather than block forever."""
+        state = _oauth_state(base_state, provider_data={})
+
+        out = charm_ctx.run(charm_ctx.on.update_status(), state)
+
+        published = next(r for r in out.relations if r.endpoint == literals.OAUTH_RELATION_NAME)
+        assert "redirect_uri" in published.local_app_data
+        assert isinstance(out.unit_status, ops.BlockedStatus)
+
     def test_blocks_until_the_client_is_registered(self, charm_ctx, base_state):
         """Serving here would publish the catalog to anyone who reaches the ingress."""
         state = _oauth_state(base_state, provider_data={})

@@ -199,9 +199,7 @@ class TestUpdateStatus:
             relations=base_state.relations | {ingress},
             containers={container},
             networks={
-                testing.Network(
-                    literals.INGRESS_RELATION_NAME, [testing.BindAddress([testing.Address("10.0.0.2")])]
-                )
+                testing.Network(literals.INGRESS_RELATION_NAME, [testing.BindAddress([testing.Address("10.0.0.2")])])
             },
         )
 

@@ -137,9 +137,8 @@ class DatahubMcpK8SOperatorCharm(TypedCharmBase[CharmConfig]):
 
         try:
             self._check_state()
-        except exceptions.UnreadyStateError as err:
-            self._stop_workload()
-            self.unit.status = ops.BlockedStatus(str(err))
+        except exceptions.UnreadyStateError:
+            self.reconcile()
             return
 
         try:

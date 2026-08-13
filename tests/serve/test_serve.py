@@ -117,7 +117,7 @@ class TestVerifierSelection:
         assert provider._scopes_supported == ["openid", "profile", "email"]
 
     def test_the_advertised_scopes_are_not_required_of_a_token(self, oauth_env):
-        """Google reports `email` and `profile` back as URIs, so requiring them rejects valid tokens."""
+        """Google reports `email` and `profile` back, so requiring them rejects valid tokens."""
         oauth_env(
             client_id=CLIENT_ID,
             client_secret="s3cret",  # nosec B106
