@@ -128,6 +128,8 @@ class DatahubMcpK8SOperatorCharm(TypedCharmBase[CharmConfig]):
         Args:
             event: The update-status event triggered at regular intervals.
         """
+        self._refresh_ingress_address()
+
         container = self.unit.get_container(literals.CONTAINER_NAME)
         if not container.can_connect():
             self.unit.status = ops.MaintenanceStatus("status check: NOT READY")
@@ -187,6 +189,17 @@ class DatahubMcpK8SOperatorCharm(TypedCharmBase[CharmConfig]):
         # the catalog to anyone who can reach the ingress.
         if not self.oauth_relation.is_ready:
             raise exceptions.UnreadyStateError("waiting for the OAuth provider to register the client")
+
+    def _refresh_ingress_address(self) -> None:
+        """Republish the unit's address on the ingress relation.
+
+        The ingress library publishes the address only on relation churn, leader
+        election and charm upgrade. On K8s those all land in the first seconds of
+        a rescheduled unit's life, when Juju can still report the departed pod's
+        address; whatever gets written then is never revisited, so the ingress
+        keeps routing to a dead IP.
+        """
+        self.ingress.provide_ingress_requirements(port=literals.MCP_PORT)
 
     def reconcile(self) -> None:
         """Reconcile the charm to its desired state.

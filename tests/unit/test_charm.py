@@ -4,6 +4,7 @@
 """Unit tests for the charm's reconcile and status logic."""
 
 import dataclasses
+import json
 
 import ops
 import pytest
@@ -184,3 +185,29 @@ class TestUpdateStatus:
 
         assert out.unit_status == ops.ActiveStatus()
         assert literals.SERVER_ENTRYPOINT in _layer(out).services[literals.SERVICE_NAME].command
+
+    def test_stale_ingress_address_is_corrected_while_the_workload_is_unreachable(self, charm_ctx, base_state):
+        """A rescheduled pod's address is republished before the health checks bail out."""
+        ingress = testing.Relation(
+            endpoint=literals.INGRESS_RELATION_NAME,
+            remote_app_name="nginx-ingress-integrator",
+            local_unit_data={"host": '"datahub-mcp-k8s-0"', "ip": '"10.0.0.1"'},
+        )
+        container = testing.Container(name=literals.CONTAINER_NAME, can_connect=False)
+        state = dataclasses.replace(
+            base_state,
+            relations=base_state.relations | {ingress},
+            containers={container},
+            networks={
+                testing.Network(
+                    literals.INGRESS_RELATION_NAME, [testing.BindAddress([testing.Address("10.0.0.2")])]
+                )
+            },
+        )
+
+        out = charm_ctx.run(charm_ctx.on.update_status(), state)
+
+        assert isinstance(out.unit_status, ops.MaintenanceStatus)
+        rel_out = out.get_relation(ingress.id)
+        assert json.loads(rel_out.local_unit_data["ip"]) == "10.0.0.2"
+        assert json.loads(rel_out.local_app_data["port"]) == literals.MCP_PORT
