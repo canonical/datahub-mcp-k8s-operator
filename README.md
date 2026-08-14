@@ -33,11 +33,14 @@ Point an MCP client at it:
 {
   "mcpServers": {
     "datahub": {
+      "type": "http",
       "url": "https://<your-hostname>/mcp"
     }
   }
 }
 ```
+
+The URL is all a client ever needs, including when the endpoint authenticates its callers: it discovers where to authenticate and obtains its own credentials on its own. No client ID, secret or callback port belongs in a client's configuration.
 
 ### How the DataHub integration works
 
@@ -62,7 +65,7 @@ juju integrate datahub-mcp-k8s nginx-ingress-integrator
 juju integrate datahub-mcp-k8s oauth-external-idp-integrator
 ```
 
-Ingress is required alongside it. The server is an OAuth 2.1 **resource server**: it never runs a login flow, it checks the bearer tokens callers already hold, and clients discover where to get one by reading `/.well-known/oauth-protected-resource` at the server's public URL. Without a public URL there is nothing to advertise, so the charm stays `blocked` until the ingress is ready.
+Ingress is required alongside it, and it must serve **HTTPS**: an OAuth issuer identifier cannot be an `http://` URL, and the charm blocks rather than let the workload fail to start. Without a public URL there is nothing to advertise at all, so it blocks then too.
 
 Give the endpoint a hostname of its own and serve it at root:
 
@@ -73,12 +76,30 @@ juju config nginx-ingress-integrator \
 
 It stays `blocked` until the provider has registered the client too. Serving in that window would leave a public endpoint open, so the charm stops the workload rather than run it unauthenticated.
 
-A user then authenticates as themselves at the identity provider since the MCP client runs the browser flow and presents the resulting token. The charm accepts a token only if the provider confirms it and it was issued for this deployment. What a caller sees in the catalog does not depend on who they are: every call reaches DataHub as the one service account from the `datahub-client` relation. The identity decides whether you may call the server at all, not what it will show you.
+A user then authenticates as themselves at the identity provider, and the charm accepts the resulting token only if the provider confirms it and it was issued for this deployment. What a caller sees in the catalog does not depend on who they are: every call reaches DataHub as the one service account from the `datahub-client` relation. The identity decides whether you may call the server at all, not what it will show you.
 
-Two dialects are supported, chosen from what the provider publishes:
+#### Providers that register clients themselves
 
-- **signed tokens**, checked locally against the provider's JWKS;
-- **unsigned tokens**, checked by asking the provider: the standard introspection endpoint, or Google's `tokeninfo` endpoint, which is the only way to check a Google token.
+Against an identity provider that publishes a `registration_endpoint` (e.g.,Ory Hydra, and so the Canonical IdP) the server is a plain OAuth 2.1 **resource server**. It runs no login flow of its own; it checks the bearer tokens callers arrive with, and points them at the provider through `/.well-known/oauth-protected-resource`. Tokens are checked either against the provider's JWKS when it signs them, or by asking its introspection endpoint when it does not.
+
+#### Google
+
+Google publishes no registration endpoint, so a client pointed at it has no way to obtain credentials, and every user would otherwise need their own OAuth client. The charm therefore runs an **OAuth proxy** in front of Google: an authorization server of its own that registers callers on demand and holds the single Google client the deployment owns. Callers see a standard, fully self-configuring OAuth server; Google sees one registered application.
+
+This also fixes the redirect URI. MCP clients listen on an ephemeral loopback port that changes per attempt, which can never match a pre-registered entry. With the proxy, Google only ever redirects to the server's own fixed callback, and the proxy forwards to whichever port the caller chose.
+
+In the Google Cloud console, per environment:
+
+1. Create an OAuth client of type **Web application**. A desktop client is not needed, the secret stays on the server and never reaches users.
+2. Add exactly one authorised redirect URI: `https://<your-hostname>/auth/callback`.
+3. Put that client's ID and secret on the `oauth-external-idp-integrator` for this deployment. Redirect URIs are per client, so this must be an integrator carrying that client, not one shared with another application.
+
+Two consequences worth knowing:
+
+- **The workload needs egress to `oauth2.googleapis.com`**, because it exchanges the authorization code and validates tokens server-side. Behind a filtering proxy, allowlist that host; the charm forwards the model's `juju-http-proxy`, `juju-https-proxy` and `juju-no-proxy` settings to the workload.
+- **Run a single unit.** The proxy is the authorization server, and it holds its client registrations and issued tokens in the unit. A second unit would not recognise the first one's tokens. Providers that register clients themselves have no such state and scale normally.
+
+ClientID Metadata Documents (CIMD), where a caller names a URL it hosts instead of registering, are deliberately not offered. Serving them means fetching a URL the caller chooses, from a domain that differs per client which a deployment behind a filtering egress proxy cannot do. Registration requires no outbound call and works everywhere.
 
 ### Mutation tools
 
