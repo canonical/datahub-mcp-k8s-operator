@@ -1,0 +1,43 @@
+# Copyright 2026 Canonical Ltd.
+# See LICENSE file for licensing details.
+
+name: datahub-mcp
+base: ubuntu@24.04
+version: '0.6.0'
+summary: "DataHub MCP server 0.6.0 rock"
+description: |
+  OCI image for the upstream DataHub Model Context Protocol server, served over
+  the streamable HTTP transport. The package is installed unmodified; the rock
+  adds only an entrypoint that composes it with an optional OAuth 2.1 token
+  verifier.
+license: Apache-2.0
+platforms:
+  amd64:
+
+run-user: _daemon_
+
+parts:
+  runtime:
+    plugin: nil
+    stage-packages:
+      - ca-certificates
+      - python3.12
+      - python3.12-minimal
+      - libpython3.12-stdlib
+
+  mcp-server:
+    after:
+      - runtime
+    plugin: nil
+    source: files
+    build-packages:
+      - python3.12
+      - python3-pip
+    override-build: |
+      craftctl default
+      pip3 install --break-system-packages --no-cache-dir --no-compile \
+        --target "${CRAFT_PART_INSTALL}/opt/mcp/lib" \
+        "mcp-server-datahub==${CRAFT_PROJECT_VERSION}"
+      install -D -m 755 serve.py "${CRAFT_PART_INSTALL}/opt/mcp/serve.py"
+    stage:
+      - opt/mcp
