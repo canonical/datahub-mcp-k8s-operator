@@ -200,6 +200,7 @@ def _auth_provider():
             base_url=base_url,
             required_scopes=["openid"],
             valid_scopes=ADVERTISED_SCOPES,
+            enable_cimd=False,
         )
 
     # RemoteAuthProvider is what serves the metadata clients read after a 401,

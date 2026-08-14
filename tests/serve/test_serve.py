@@ -173,6 +173,14 @@ class TestGoogleAuthorizationServer:
 
         assert provider.required_scopes == ["openid"]
 
+    def test_callers_are_not_offered_the_document_route(self, oauth_env):
+        """Fetching a caller-chosen URL is not something a filtered egress allows."""
+        document = self._metadata(oauth_env, "/.well-known/oauth-authorization-server")
+
+        assert "client_id_metadata_document_supported" not in document
+        # Registration stays, so a caller still has a way to identify itself.
+        assert document["registration_endpoint"] == f"{BASE_URL}/register"
+
 
 class TestCheckedIntrospectionVerifier:
     """Tests for the audience check added on top of the standard endpoint."""
