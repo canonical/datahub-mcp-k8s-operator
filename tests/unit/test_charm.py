@@ -86,6 +86,21 @@ class TestBlockedStates:
         assert isinstance(out.unit_status, ops.BlockedStatus)
         assert "ingress" in out.unit_status.message
 
+    def test_blocks_when_oauth_is_enabled_over_http(self, charm_ctx, base_state):
+        """An http issuer is rejected by the workload, which would otherwise restart forever."""
+        oauth = testing.Relation(endpoint=literals.OAUTH_RELATION_NAME, remote_app_name="idp")
+        ingress = testing.Relation(
+            endpoint=literals.INGRESS_RELATION_NAME,
+            remote_app_name="nginx-ingress-integrator",
+            remote_app_data={"ingress": json.dumps({"url": "http://mcp.example.com"})},
+        )
+        state = dataclasses.replace(base_state, relations=base_state.relations | {oauth, ingress})
+
+        out = charm_ctx.run(charm_ctx.on.config_changed(), state)
+
+        assert isinstance(out.unit_status, ops.BlockedStatus)
+        assert "https" in out.unit_status.message
+
 
 class TestReconcile:
     """Tests for the happy path."""

@@ -4,7 +4,12 @@
 """Entrypoint for the charmed DataHub MCP server.
 
 Runs the upstream `mcp-server-datahub` application unmodified, over the
-streamable HTTP transport, optionally behind an OAuth 2.1 token verifier.
+streamable HTTP transport, optionally behind OAuth 2.1.
+
+How a caller is authenticated depends on what the provider supports. A provider
+that registers clients on demand is advertised to callers directly. Google does
+not, so it is fronted by an **OAuth proxy**: an authorization server of our own
+that registers callers itself and forwards them upstream. See `_auth_provider`.
 
 Client authentication is off unless `MCP_AUTH_ISSUER` is set. The charm sets it,
 and the variables below, from the `oauth` relation:
@@ -22,8 +27,8 @@ import os
 from typing import Any, List, Optional
 from urllib.parse import urlparse
 
-import httpx
 from fastmcp.server.auth.auth import AccessToken, RemoteAuthProvider, TokenVerifier
+from fastmcp.server.auth.providers.google import GoogleProvider
 from fastmcp.server.auth.providers.introspection import IntrospectionTokenVerifier
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from mcp_server_datahub.__main__ import create_app
@@ -49,64 +54,6 @@ def _audience_matches(claim: Any, expected: List[str]) -> bool:
         return False
     values = claim if isinstance(claim, list) else [claim]
     return any(value in expected for value in values)
-
-
-class GoogleAccessTokenVerifier(TokenVerifier):
-    """Check a Google access token through Google's tokeninfo endpoint.
-
-    Google's tokens carry no signature to check locally, and it does not offer
-    the standard validation endpoint, so this is the only way to check one.
-    """
-
-    def __init__(self, tokeninfo_url: str, audiences: List[str], **kwargs):
-        """Construct.
-
-        Args:
-            tokeninfo_url: Google's tokeninfo endpoint.
-            audiences: Identifiers that mean a token was issued for us.
-            kwargs: Passed through to TokenVerifier (base_url, required_scopes).
-        """
-        super().__init__(**kwargs)
-        self._tokeninfo_url = tokeninfo_url
-        self._audiences = audiences
-
-    async def verify_token(self, token: str) -> Optional[AccessToken]:
-        """Return the token's details, or None when it is not usable.
-
-        Args:
-            token: The bearer token presented by the client.
-
-        Returns:
-            An AccessToken when the token is valid and was issued for us,
-            otherwise None.
-        """
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    self._tokeninfo_url,
-                    params={"access_token": token},
-                    timeout=10,
-                )
-        except httpx.HTTPError:
-            # Treat an unreachable provider as a failed check, not an open door.
-            return None
-
-        # Google reports an expired, revoked or unknown token as a 400.
-        if response.status_code != 200:
-            return None
-
-        info = response.json()
-        if not _audience_matches(info.get("aud"), self._audiences):
-            return None
-
-        return AccessToken(
-            token=token,
-            client_id=str(info.get("aud")),
-            scopes=(info.get("scope") or "").split(),
-            expires_at=int(info["exp"]) if info.get("exp") else None,
-            subject=info.get("sub"),
-            claims=info,
-        )
 
 
 class CheckedIntrospectionVerifier(IntrospectionTokenVerifier):
@@ -176,7 +123,7 @@ def _required(name: str) -> str:
 
 
 def _token_verifier(base_url: str) -> TokenVerifier:
-    """Build the token check described by the environment.
+    """Build the token check for a provider that registers clients itself.
 
     Every path out of here either returns a verifier or raises. There is
     deliberately no "could not build one" return value: the caller has already
@@ -208,18 +155,9 @@ def _token_verifier(base_url: str) -> TokenVerifier:
             base_url=base_url,
         )
 
-    introspection_url = _required("MCP_AUTH_INTROSPECTION_URL")
-
-    if _uses_google_tokeninfo(introspection_url):
-        return GoogleAccessTokenVerifier(
-            tokeninfo_url=introspection_url,
-            audiences=audiences,
-            base_url=base_url,
-        )
-
     return CheckedIntrospectionVerifier(
         audiences=audiences,
-        introspection_url=introspection_url,
+        introspection_url=_required("MCP_AUTH_INTROSPECTION_URL"),
         client_id=client_id,
         client_secret=_required("MCP_AUTH_CLIENT_SECRET"),
         base_url=base_url,
@@ -233,20 +171,41 @@ def _auth_provider():
     authenticate. From that point on a missing piece is a startup failure, not
     a reason to open the endpoint: the process exits and pebble reports it.
 
+    The provider depends on whether callers can register themselves with the
+    identity provider. Where they can, it is named directly and this server only
+    checks the tokens they arrive with. Google publishes no registration
+    endpoint, so pointing callers at it leaves them with no way to obtain a
+    client which is why Google is fronted by an OAuth proxy instead. The proxy
+    is an authorization server in its own right: callers register with it and it
+    holds the single Google client the deployment owns.
+
     Returns:
-        A RemoteAuthProvider, or None when client authentication is disabled.
+        An auth provider, or None when client authentication is disabled.
     """
     issuer = os.getenv("MCP_AUTH_ISSUER")
     base_url = os.getenv("MCP_AUTH_BASE_URL") or None
     if not issuer or not base_url:
         return None
 
-    verifier = _token_verifier(base_url)
+    if _uses_google_tokeninfo(os.getenv("MCP_AUTH_INTROSPECTION_URL") or ""):
+        # `GoogleProvider` is FastMCP's OAuth proxy preconfigured for Google.
+        # Callers register with it and are redirected on to Google, whose own
+        # redirect comes back here rather than to whichever loopback port the
+        # caller happens to be listening on. That is what lets a deployment
+        # register one fixed redirect URI with Google and serve every caller
+        # with it.
+        return GoogleProvider(
+            client_id=_required("MCP_AUTH_CLIENT_ID"),
+            client_secret=_required("MCP_AUTH_CLIENT_SECRET"),
+            base_url=base_url,
+            required_scopes=["openid"],
+            valid_scopes=ADVERTISED_SCOPES,
+        )
 
     # RemoteAuthProvider is what serves the metadata clients read after a 401,
     # so they can discover the identity provider on their own.
     return RemoteAuthProvider(
-        token_verifier=verifier,
+        token_verifier=_token_verifier(base_url),
         authorization_servers=[issuer],
         base_url=base_url,
         scopes_supported=ADVERTISED_SCOPES,
@@ -258,8 +217,16 @@ def main():
     """Start the MCP server on the streamable HTTP transport."""
     mcp = create_app()
     mcp.auth = _auth_provider()
-    # Stateless so that any replica can serve any request, which is what makes
-    # the workload horizontally scalable behind a single ingress.
+    # `stateless_http` keeps no MCP session between requests, so any replica can
+    # serve any MCP request.
+    #
+    # That alone does not make every deployment scalable. Against Google the
+    # OAuth proxy is itself the authorization server, and it keeps its client
+    # registrations and the tokens it issued on local disk. A replica recognises
+    # only what it issued itself, so a request balanced to a different one is
+    # rejected: run a single replica when fronting Google. Every other provider
+    # is scalable, because there the token is checked against the provider
+    # rather than against anything held here.
     mcp.run(transport="http", stateless_http=True, show_banner=False)
 
 

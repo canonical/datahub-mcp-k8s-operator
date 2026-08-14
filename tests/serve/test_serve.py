@@ -9,11 +9,20 @@ import httpx
 import pytest
 import respx
 import serve
+from fastmcp.server.auth.providers.google import GoogleProvider
 from fastmcp.server.auth.providers.jwt import JWTVerifier
+from starlette.applications import Starlette
+from starlette.testclient import TestClient
 
 BASE_URL = "https://mcp.example.com"
 CLIENT_ID = "datahub-mcp"
+GOOGLE_ISSUER = "https://accounts.google.com"
 GOOGLE_TOKENINFO = "https://oauth2.googleapis.com/tokeninfo"
+GOOGLE_SCOPE_URIS = [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/userinfo.email",
+]
 HYDRA_INTROSPECTION = "https://hydra.example.com/admin/oauth2/introspect"
 ISSUER = "https://idp.example.com"
 JWKS_URL = f"{ISSUER}/.well-known/jwks.json"
@@ -59,12 +68,6 @@ class TestVerifierSelection:
 
         assert isinstance(serve._token_verifier(BASE_URL), JWTVerifier)
 
-    def test_google_uses_its_own_endpoint(self, oauth_env):
-        """Google offers neither signed tokens nor the standard endpoint."""
-        oauth_env(client_id=CLIENT_ID, client_secret="s3cret", introspection_url=GOOGLE_TOKENINFO)  # nosec B106
-
-        assert isinstance(serve._token_verifier(BASE_URL), serve.GoogleAccessTokenVerifier)
-
     def test_any_other_provider_uses_the_standard_endpoint(self, oauth_env):
         """The standard check is the default, not a special case."""
         oauth_env(client_id=CLIENT_ID, client_secret="s3cret", introspection_url=HYDRA_INTROSPECTION)  # nosec B106
@@ -102,79 +105,73 @@ class TestVerifierSelection:
 
         assert serve._auth_provider() is None
 
-    def test_the_metadata_names_the_scopes_to_ask_for(self, oauth_env):
-        """A client with nothing to request sends no scope, which Google rejects."""
+
+class TestGoogleAuthorizationServer:
+    """Tests for the authorization server run in front of Google.
+
+    Google publishes no registration endpoint, so a caller pointed at it has no
+    way to obtain a client of its own. These cover what this deployment
+    advertises in Google's place.
+    """
+
+    def _provider(self, oauth_env):
+        """Return the provider built for a Google deployment.
+
+        Args:
+            oauth_env: Fixture setting the entrypoint's environment.
+
+        Returns:
+            The provider `_auth_provider` selects for Google.
+        """
         oauth_env(
             client_id=CLIENT_ID,
             client_secret="s3cret",  # nosec B106
-            issuer=ISSUER,
+            issuer=GOOGLE_ISSUER,
             base_url=BASE_URL,
             introspection_url=GOOGLE_TOKENINFO,
         )
+        return serve._auth_provider()
 
-        provider = serve._auth_provider()
+    def _metadata(self, oauth_env, path):
+        """Return a metadata document as this deployment serves it.
 
-        assert provider._scopes_supported == ["openid", "profile", "email"]
+        Args:
+            oauth_env: Fixture setting the entrypoint's environment.
+            path: The well-known path to fetch.
 
-    def test_the_advertised_scopes_are_not_required_of_a_token(self, oauth_env):
-        """Google reports `email` and `profile` back, so requiring them rejects valid tokens."""
-        oauth_env(
-            client_id=CLIENT_ID,
-            client_secret="s3cret",  # nosec B106
-            issuer=ISSUER,
-            base_url=BASE_URL,
-            introspection_url=GOOGLE_TOKENINFO,
-        )
+        Returns:
+            The document, decoded.
+        """
+        app = Starlette(routes=self._provider(oauth_env).get_routes("/mcp"))
+        return TestClient(app).get(path).json()
 
-        provider = serve._auth_provider()
+    def test_google_is_fronted_rather_than_advertised(self, oauth_env):
+        """Google cannot register a caller, so it is not what callers are sent to."""
+        assert isinstance(self._provider(oauth_env), GoogleProvider)
 
-        assert provider.token_verifier.required_scopes in (None, [])
+    def test_callers_are_offered_somewhere_to_register(self, oauth_env):
+        """The missing registration endpoint is the whole reason this server exists."""
+        document = self._metadata(oauth_env, "/.well-known/oauth-authorization-server")
 
+        assert document["registration_endpoint"] == f"{BASE_URL}/register"
 
-class TestGoogleAccessTokenVerifier:
-    """Tests for the Google tokeninfo check."""
+    def test_callers_are_pointed_at_us_and_not_at_google(self, oauth_env):
+        """A caller sent straight to Google is the failure this replaces."""
+        document = self._metadata(oauth_env, "/.well-known/oauth-protected-resource/mcp")
 
-    def _verifier(self):
-        """Return a verifier pointed at Google's endpoint."""
-        return serve.GoogleAccessTokenVerifier(
-            tokeninfo_url=GOOGLE_TOKENINFO,
-            audiences=[CLIENT_ID, BASE_URL],
-            base_url=BASE_URL,
-        )
+        assert document["authorization_servers"] == [f"{BASE_URL}/"]
 
-    @respx.mock
-    def test_accepts_a_token_issued_for_us(self):
-        """The normal path: Google confirms the token and it names us."""
-        respx.get(GOOGLE_TOKENINFO).mock(
-            return_value=httpx.Response(200, json={"aud": CLIENT_ID, "sub": "user-1", "scope": "openid email"})
-        )
+    def test_the_scopes_to_ask_for_are_advertised(self, oauth_env):
+        """A caller with nothing to request sends no scope, which Google rejects."""
+        document = self._metadata(oauth_env, "/.well-known/oauth-authorization-server")
 
-        access = _verify(self._verifier())
+        assert document["scopes_supported"] == GOOGLE_SCOPE_URIS
 
-        assert access is not None
-        assert access.subject == "user-1"
-        assert access.scopes == ["openid", "email"]
+    def test_only_openid_is_demanded_of_a_token(self, oauth_env):
+        """Requiring the rest would reject a caller that asked for less."""
+        provider = self._provider(oauth_env)
 
-    @respx.mock
-    def test_rejects_a_token_issued_for_another_application(self):
-        """Google confirms tokens for every application, so this is the real check."""
-        respx.get(GOOGLE_TOKENINFO).mock(return_value=httpx.Response(200, json={"aud": "someone-else", "sub": "u"}))
-
-        assert _verify(self._verifier()) is None
-
-    @respx.mock
-    def test_rejects_a_token_google_does_not_recognise(self):
-        """Expired, revoked and unknown tokens all come back as a 400."""
-        respx.get(GOOGLE_TOKENINFO).mock(return_value=httpx.Response(400, json={"error": "invalid_token"}))
-
-        assert _verify(self._verifier()) is None
-
-    @respx.mock
-    def test_rejects_when_google_is_unreachable(self):
-        """An unreachable provider must fail closed rather than let traffic through."""
-        respx.get(GOOGLE_TOKENINFO).mock(side_effect=httpx.ConnectError("no route"))
-
-        assert _verify(self._verifier()) is None
+        assert provider.required_scopes == ["openid"]
 
 
 class TestCheckedIntrospectionVerifier:

@@ -182,6 +182,12 @@ class DatahubMcpK8SOperatorCharm(TypedCharmBase[CharmConfig]):
                 "clients need a public URL to discover the authorization server"
             )
 
+        if not self.public_url.startswith("https://"):
+            raise exceptions.UnreadyStateError(
+                f"OAuth is enabled but the ingress serves {self.public_url} over http; "
+                "OAuth requires https, so relate a certificates provider to the ingress"
+            )
+
         # Relating an identity provider is how a deployment says its callers must
         # authenticate. Until the provider has answered with credentials the
         # workload has no way to check a token, and serving anyway would publish
