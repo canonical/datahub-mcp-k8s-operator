@@ -15,4 +15,4 @@ jobs:
       actions: read
     with:
       channel: latest/edge
-
+      resource-mapping: '{"datahub-mcp": "datahub-mcp"}'
