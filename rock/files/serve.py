@@ -128,14 +128,64 @@ class OwnClientOnlyVerifier(TokenVerifier):
             return None
 
         claims = access.claims or {}
-        presented = next(
-            (claims[name] for name in CLIENT_ID_CLAIMS if claims.get(name)), None
-        )
+        presented = next((claims[name] for name in CLIENT_ID_CLAIMS if claims.get(name)), None)
         # A token naming no client cannot be shown to belong to ours, and this
         # deployment asked to serve only ours, so it is refused.
         if presented != self._client_id:
             return None
         return access
+
+
+class OwnClientOnlyProxy(GoogleProvider):  # pylint: disable=too-many-ancestors
+    """OAuth proxy that resolves no client but the one this deployment holds.
+
+    Withdrawing the registration endpoint stops a caller from obtaining a client
+    it does not have, but it says nothing about the ones already handed out. The
+    proxy keeps the registrations it issued, and `/authorize` and `/token` never
+    consult the registration switch, so a caller that registered while it was on
+    keeps working afterwards for as long as that record survives.
+
+    Refusing to resolve any other client closes that. Every route that acts on
+    behalf of a client looks it up here first: the authorize handler directly,
+    and the token endpoint through the client authentication that guards it, so
+    a code exchange and a refresh are both refused along with the rest.
+    """
+
+    def __init__(self, *, client_id: str, **kwargs):
+        """Construct.
+
+        Args:
+            client_id: This deployment's own OAuth client, the only one served.
+            kwargs: Passed through to GoogleProvider.
+
+        Raises:
+            ValueError: If the proxy holds no registration options to withdraw,
+                which would leave it registering callers this refuses to serve.
+        """
+        super().__init__(client_id=client_id, **kwargs)
+        self._own_client_id = client_id
+        # The proxy turns registration on unconditionally, so it is withdrawn
+        # here. Both the route and the metadata entry advertising it are built
+        # from these options at startup, so a caller is told registration is
+        # unavailable rather than left to discover a 404.
+        options = self.client_registration_options
+        if options is None:
+            raise ValueError("the OAuth proxy exposed no client registration options to withdraw")
+        options.enabled = False
+
+    async def get_client(self, client_id: str) -> Optional[Any]:
+        """Return the registered client with this identifier, if it is ours.
+
+        Args:
+            client_id: The client an incoming request claims to be.
+
+        Returns:
+            The client when it is this deployment's own, otherwise None, which
+            the routes above report as an invalid client.
+        """
+        if client_id != self._own_client_id:
+            return None
+        return await super().get_client(client_id)
 
 
 class CheckedIntrospectionVerifier(IntrospectionTokenVerifier):
@@ -207,20 +257,18 @@ def _required(name: str) -> str:
 def _token_verifier(base_url: str) -> TokenVerifier:
     """Build the token check for a provider that registers clients itself.
 
-    Every path out of here either returns a verifier or raises. There is
-    deliberately no "could not build one" return value: the caller has already
-    established that this deployment authenticates its callers, and answering
-    it with nothing would serve the catalog to anyone who can reach the port.
+    Every path out of here either returns a verifier or stops the process:
+    `_required` raises when the environment names an issuer but describes no way
+    to check a token against it. There is deliberately no "could not build one"
+    return value, because the caller has already established that this
+    deployment authenticates its callers, and answering it with nothing would
+    serve the catalog to anyone who can reach the port.
 
     Args:
         base_url: Public base URL of this server.
 
     Returns:
         A TokenVerifier.
-
-    Raises:
-        ValueError: If the environment names an issuer but describes no way to
-            check a token against it.
     """
     client_id = _required("MCP_AUTH_CLIENT_ID")
     # A token issued for us names either this server or the client it was
@@ -270,11 +318,10 @@ def _auth_provider():
     holds the single Google client the deployment owns.
 
     Where registration is turned off, that difference decides where the rule is
-    enforced. In front of Google this server is the registrar, so it stops
-    registering and stops advertising that it does; the only client left is the
-    one it holds, which is exactly the one an operator pastes into a caller
-    they provisioned. Elsewhere the provider is the registrar and this server
-    cannot stop it, so it refuses the resulting tokens instead.
+    enforced. In front of Google this server is the registrar, so it serves only
+    the client it holds, which is exactly the one an operator pastes into a
+    caller they provisioned. Elsewhere the provider is the registrar and this
+    server cannot stop it, so it refuses the resulting tokens instead.
 
     Returns:
         An auth provider, or None when client authentication is disabled.
@@ -291,7 +338,8 @@ def _auth_provider():
         # caller happens to be listening on. That is what lets a deployment
         # register one fixed redirect URI with Google and serve every caller
         # with it.
-        provider = GoogleProvider(
+        proxy = GoogleProvider if _client_registration_enabled() else OwnClientOnlyProxy
+        return proxy(
             client_id=_required("MCP_AUTH_CLIENT_ID"),
             client_secret=_required("MCP_AUTH_CLIENT_SECRET"),
             base_url=base_url,
@@ -299,15 +347,6 @@ def _auth_provider():
             valid_scopes=ADVERTISED_SCOPES,
             enable_cimd=False,
         )
-        if not _client_registration_enabled():
-            # The proxy turns registration on unconditionally, so this is
-            # withdrawn afterwards. Both the route and the entry advertising it
-            # come from these options when the routes are built at startup, so
-            # a caller is told registration is unavailable rather than left to
-            # discover a 404. A caller presenting the client held here is
-            # unaffected: the proxy recognises it without a registration.
-            provider.client_registration_options.enabled = False
-        return provider
 
     # RemoteAuthProvider is what serves the metadata clients read after a 401,
     # so they can discover the identity provider on their own.

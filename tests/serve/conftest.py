@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 import requests
+from fastmcp import settings
 
 SERVE_DIR = Path(__file__).parents[2] / "rock" / "files"
 sys.path.insert(0, str(SERVE_DIR))
@@ -203,3 +204,18 @@ def oauth_env(monkeypatch):
             monkeypatch.setenv(f"MCP_AUTH_{name.upper()}", value)
 
     return _set
+
+
+@pytest.fixture(autouse=True)
+def proxy_storage(monkeypatch, tmp_path):
+    """Keep the OAuth proxy's client registrations inside the test.
+
+    The proxy persists what it registers under FastMCP's data directory, which
+    would otherwise carry one test's clients into the next and into the home
+    directory of whoever ran them.
+
+    Args:
+        monkeypatch: Fixture used to redirect the directory.
+        tmp_path: Per-test directory to redirect it to.
+    """
+    monkeypatch.setattr(settings, "home", tmp_path)

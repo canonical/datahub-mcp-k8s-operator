@@ -305,6 +305,18 @@ class TestRegistrationDisabledInFrontOfGoogle:
         Returns:
             A Starlette app serving the provider's routes.
         """
+        return Starlette(routes=self._provider(oauth_env, registration).get_routes("/mcp"))
+
+    def _provider(self, oauth_env, registration):
+        """Return the provider for a Google deployment.
+
+        Args:
+            oauth_env: Fixture setting the entrypoint's environment.
+            registration: What the charm set the switch to.
+
+        Returns:
+            The auth provider the entrypoint builds.
+        """
         oauth_env(
             client_id=CLIENT_ID,
             client_secret="s3cret",  # nosec B106
@@ -313,7 +325,21 @@ class TestRegistrationDisabledInFrontOfGoogle:
             introspection_url=GOOGLE_TOKENINFO,
             client_registration=registration,
         )
-        return Starlette(routes=serve._auth_provider().get_routes("/mcp"))
+        return serve._auth_provider()
+
+    def _register_a_caller(self, oauth_env):
+        """Register a caller of its own, as one did before the switch was flipped.
+
+        Args:
+            oauth_env: Fixture setting the entrypoint's environment.
+
+        Returns:
+            The client identifier that caller came away with.
+        """
+        provider = self._provider(oauth_env, "true")
+        client = TestClient(Starlette(routes=provider.get_routes("/mcp")))
+        response = client.post("/register", json={"redirect_uris": ["http://localhost:1234/"]})
+        return response.json()["client_id"]
 
     def test_registration_is_no_longer_advertised(self, oauth_env):
         """A caller reads this before trying, so it fails discovery rather than a request."""
@@ -351,6 +377,38 @@ class TestRegistrationDisabledInFrontOfGoogle:
         document = client.get("/.well-known/oauth-authorization-server").json()
 
         assert document["registration_endpoint"] == f"{BASE_URL}/register"
+
+    def test_the_client_held_here_still_resolves(self, oauth_env):
+        """Authorize and token both look the client up, so ours has to be found."""
+        provider = self._provider(oauth_env, "false")
+
+        client = asyncio.run(provider.get_client(CLIENT_ID))
+
+        assert client is not None
+        assert client.client_id == CLIENT_ID
+
+    def test_a_caller_that_registered_earlier_is_cut_off(self, oauth_env):
+        """Withdrawing the route leaves the registrations already handed out.
+
+        Those outlive the switch, and neither authorize nor token consults it,
+        so the caller has to be refused where the client is resolved instead.
+        """
+        registered = self._register_a_caller(oauth_env)
+        provider = self._provider(oauth_env, "false")
+
+        assert asyncio.run(provider.get_client(registered)) is None
+
+    def test_that_caller_is_served_while_registration_is_on(self, oauth_env):
+        """Otherwise the test above would pass on an empty store and prove nothing."""
+        registered = self._register_a_caller(oauth_env)
+        provider = self._provider(oauth_env, "true")
+
+        assert asyncio.run(provider.get_client(registered)) is not None
+
+    def test_only_the_switch_decides_which_proxy_is_built(self, oauth_env):
+        """The gate is the whole difference, so it must not reach the default."""
+        assert not isinstance(self._provider(oauth_env, "true"), serve.OwnClientOnlyProxy)
+        assert isinstance(self._provider(oauth_env, "false"), serve.OwnClientOnlyProxy)
 
 
 class TestRegistrationDisabledAtTheProvider:
