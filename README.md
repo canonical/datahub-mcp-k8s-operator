@@ -40,7 +40,7 @@ Point an MCP client at it:
 }
 ```
 
-The URL is all a client ever needs, including when the endpoint authenticates its callers: it discovers where to authenticate and obtains its own credentials on its own. No client ID, secret or callback port belongs in a client's configuration.
+The URL is all a client ever needs, including when the endpoint authenticates its callers: it discovers where to authenticate and obtains its own credentials on its own. No client ID, secret or callback port belongs in a client's configuration. The exception is a deployment that has [limited itself to callers registered in advance](#limiting-the-endpoint-to-callers-you-registered), where an operator hands the client its credentials instead.
 
 ### How the DataHub integration works
 
@@ -100,6 +100,18 @@ Two consequences worth knowing:
 - **Run a single unit.** The proxy is the authorization server, and it holds its client registrations and issued tokens in the unit. A second unit would not recognise the first one's tokens. Providers that register clients themselves have no such state and scale normally.
 
 ClientID Metadata Documents (CIMD), where a caller names a URL it hosts instead of registering, are deliberately not offered. Serving them means fetching a URL the caller chooses, from a domain that differs per client which a deployment behind a filtering egress proxy cannot do. Registration requires no outbound call and works everywhere.
+
+#### Limiting the endpoint to callers you registered
+
+By default a caller may obtain an OAuth client of its own. That is how an MCP client on a developer's machine connects with nothing configured but the URL, and it means anyone who can reach the endpoint and authenticate at the identity provider can call the tools.
+
+`enable-client-registration=false` withdraws that, leaving only the callers an operator set up in advance by giving them this deployment's own client ID and secret:
+
+```sh
+juju config datahub-mcp-k8s enable-client-registration=false
+```
+
+A caller configured that way needs no charm configuration of its own. It presents the client this deployment already holds, which the server recognises without a registration. Gemini Enterprise connects this way: it is given the endpoint's `/authorize` and `/token` URLs together with the same client ID and secret that are on the `oauth` relation.
 
 ### Mutation tools
 
