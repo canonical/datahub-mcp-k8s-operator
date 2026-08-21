@@ -9,6 +9,7 @@ import httpx
 import pytest
 import respx
 import serve
+from fastmcp.server.auth.auth import AccessToken, TokenVerifier
 from fastmcp.server.auth.providers.google import GoogleProvider
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from starlette.applications import Starlette
@@ -232,3 +233,214 @@ class TestCheckedIntrospectionVerifier:
 def test_google_is_recognised_by_host_alone(url, expected):
     """A lookalike hostname must not select Google's dialect."""
     assert serve._uses_google_tokeninfo(url) is expected
+
+
+class _StubVerifier(TokenVerifier):
+    """Stand-in for the check a token passes before its client is looked at."""
+
+    def __init__(self, access):
+        """Construct.
+
+        Args:
+            access: What the wrapped check returns, None to refuse the token.
+        """
+        super().__init__(required_scopes=["openid"])
+        self.access = access
+
+    async def verify_token(self, token):
+        """Return the prepared answer.
+
+        Args:
+            token: Ignored; the answer is fixed per instance.
+
+        Returns:
+            Whatever this stub was built with.
+        """
+        return self.access
+
+
+def _token(**claims):
+    """Return an access token carrying the given claims."""
+    return AccessToken(token="a-token", client_id="unused", scopes=["openid"], claims=claims)  # nosec B106
+
+
+class TestRegistrationSwitchParsing:
+    """Tests for reading the switch out of the environment."""
+
+    @pytest.mark.parametrize("value", ["false", "False", "FALSE"])
+    def test_the_charm_can_turn_registration_off(self, monkeypatch, value):
+        """The charm writes a lowercased boolean, but test the case anyway."""
+        monkeypatch.setenv("MCP_AUTH_CLIENT_REGISTRATION", value)
+
+        assert serve._client_registration_enabled() is False
+
+    @pytest.mark.parametrize("value", ["true", "", "yes"])
+    def test_anything_else_leaves_it_on(self, monkeypatch, value):
+        """Only an explicit refusal narrows who may connect."""
+        monkeypatch.setenv("MCP_AUTH_CLIENT_REGISTRATION", value)
+
+        assert serve._client_registration_enabled() is True
+
+    def test_an_unset_variable_leaves_it_on(self, monkeypatch):
+        """A deployment that never set it keeps serving the callers it served before."""
+        monkeypatch.delenv("MCP_AUTH_CLIENT_REGISTRATION", raising=False)
+
+        assert serve._client_registration_enabled() is True
+
+
+class TestRegistrationDisabledInFrontOfGoogle:
+    """Tests for withdrawing registration from the server that offers it.
+
+    This deployment is the registrar in front of Google, so turning registration
+    off is something it can enforce itself rather than only refuse afterwards.
+    """
+
+    def _app(self, oauth_env, registration):
+        """Return the routed application for a Google deployment.
+
+        Args:
+            oauth_env: Fixture setting the entrypoint's environment.
+            registration: What the charm set the switch to.
+
+        Returns:
+            A Starlette app serving the provider's routes.
+        """
+        oauth_env(
+            client_id=CLIENT_ID,
+            client_secret="s3cret",  # nosec B106
+            issuer=GOOGLE_ISSUER,
+            base_url=BASE_URL,
+            introspection_url=GOOGLE_TOKENINFO,
+            client_registration=registration,
+        )
+        return Starlette(routes=serve._auth_provider().get_routes("/mcp"))
+
+    def test_registration_is_no_longer_advertised(self, oauth_env):
+        """A caller reads this before trying, so it fails discovery rather than a request."""
+        client = TestClient(self._app(oauth_env, "false"))
+
+        document = client.get("/.well-known/oauth-authorization-server").json()
+
+        assert "registration_endpoint" not in document
+
+    def test_registration_is_no_longer_served(self, oauth_env):
+        """Withdrawing the advertisement alone would leave it open to anyone who knew it."""
+        client = TestClient(self._app(oauth_env, "false"))
+
+        response = client.post("/register", json={"redirect_uris": ["http://localhost:1234/"]})
+
+        assert response.status_code == 404
+
+    def test_a_caller_registered_up_front_keeps_its_way_in(self, oauth_env):
+        """The point is to leave exactly this caller, so it has to survive.
+
+        The client held here is recognised without a registration, which is what
+        an operator pastes into a caller they provisioned.
+        """
+        client = TestClient(self._app(oauth_env, "false"))
+
+        document = client.get("/.well-known/oauth-authorization-server").json()
+
+        assert document["authorization_endpoint"] == f"{BASE_URL}/authorize"
+        assert document["token_endpoint"] == f"{BASE_URL}/token"
+
+    def test_leaving_it_on_still_registers_callers(self, oauth_env):
+        """The default has to stay what deployments already run."""
+        client = TestClient(self._app(oauth_env, "true"))
+
+        document = client.get("/.well-known/oauth-authorization-server").json()
+
+        assert document["registration_endpoint"] == f"{BASE_URL}/register"
+
+
+class TestRegistrationDisabledAtTheProvider:
+    """Tests for refusing self-registered callers of a provider we do not run.
+
+    Registration happens at the provider here, so there is no route to withdraw
+    and the rule is applied to the tokens it hands out instead.
+    """
+
+    def _verifier(self, oauth_env, registration):
+        """Return the verifier built for a non-Google deployment.
+
+        Args:
+            oauth_env: Fixture setting the entrypoint's environment.
+            registration: What the charm set the switch to.
+
+        Returns:
+            The verifier `_token_verifier` selects.
+        """
+        oauth_env(
+            client_id=CLIENT_ID,
+            client_secret="s3cret",  # nosec B106
+            issuer=ISSUER,
+            base_url=BASE_URL,
+            introspection_url=HYDRA_INTROSPECTION,
+            client_registration=registration,
+        )
+        return serve._token_verifier(BASE_URL)
+
+    def test_the_client_is_checked_when_registration_is_off(self, oauth_env):
+        """Nothing else distinguishes a self-registered caller at the same provider."""
+        assert isinstance(self._verifier(oauth_env, "false"), serve.OwnClientOnlyVerifier)
+
+    def test_the_client_is_not_checked_when_registration_is_on(self, oauth_env):
+        """A caller that registered itself is a legitimate caller by default."""
+        assert isinstance(self._verifier(oauth_env, "true"), serve.CheckedIntrospectionVerifier)
+
+    def test_offline_access_is_advertised(self, oauth_env):
+        """A caller registered up front needs a refresh token to stay connected.
+
+        Google rejects the scope, so it is only offered where it means something.
+        """
+        oauth_env(
+            client_id=CLIENT_ID,
+            client_secret="s3cret",  # nosec B106
+            issuer=ISSUER,
+            base_url=BASE_URL,
+            introspection_url=HYDRA_INTROSPECTION,
+        )
+        app = Starlette(routes=serve._auth_provider().get_routes("/mcp"))
+
+        document = TestClient(app).get("/.well-known/oauth-protected-resource/mcp").json()
+
+        assert "offline_access" in document["scopes_supported"]
+
+
+class TestOwnClientOnlyVerifier:
+    """Tests for the check that a token belongs to the client this deployment owns."""
+
+    def _verifier(self, access):
+        """Return the verifier wrapping a check with a fixed answer.
+
+        Args:
+            access: What the wrapped check returns.
+
+        Returns:
+            An OwnClientOnlyVerifier.
+        """
+        return serve.OwnClientOnlyVerifier(_StubVerifier(access), CLIENT_ID)
+
+    def test_accepts_a_token_issued_to_our_client(self):
+        """The caller an operator provisioned holds exactly this client."""
+        access = _token(client_id=CLIENT_ID)
+
+        assert _verify(self._verifier(access)) is access
+
+    def test_accepts_a_token_naming_our_client_as_the_authorized_party(self):
+        """A signed token names the client in `azp` rather than `client_id`."""
+        access = _token(azp=CLIENT_ID)
+
+        assert _verify(self._verifier(access)) is access
+
+    def test_rejects_a_token_issued_to_a_client_that_registered_itself(self):
+        """This is the caller the deployment asked not to serve."""
+        assert _verify(self._verifier(_token(client_id="self-registered"))) is None
+
+    def test_rejects_a_token_naming_no_client(self):
+        """A token that cannot be shown to be ours is not treated as ours."""
+        assert _verify(self._verifier(_token(sub="a-user"))) is None
+
+    def test_a_token_the_provider_rejected_stays_rejected(self):
+        """The client check adds to the existing one rather than replacing it."""
+        assert _verify(self._verifier(None)) is None

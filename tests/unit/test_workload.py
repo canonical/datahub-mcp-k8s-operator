@@ -31,10 +31,13 @@ PROVIDER = SimpleNamespace(
 )
 
 
-def _charm(*, provider=None, public_url=None, mutations=False, oauth_ready=True):
+def _charm(*, provider=None, public_url=None, mutations=False, oauth_ready=True, registration=True):
     """Build a stub charm exposing everything workload.py reads."""
     return SimpleNamespace(
-        config=SimpleNamespace(enable_mutation_tools=mutations),
+        config=SimpleNamespace(
+            enable_mutation_tools=mutations,
+            enable_client_registration=registration,
+        ),
         datahub_relation=SimpleNamespace(connection=CONNECTION),
         oauth_relation=SimpleNamespace(provider_info=provider, is_ready=oauth_ready),
         public_url=public_url,
@@ -65,6 +68,18 @@ class TestOauthEnvironment:
         assert env["MCP_AUTH_INTROSPECTION_URL"] == "https://idp.example.com/introspect"
         assert env["MCP_AUTH_CLIENT_ID"] == "mcp-client"
         assert env["MCP_AUTH_CLIENT_SECRET"] == "mcp-secret"  # nosec B105
+
+    def test_carries_the_registration_switch(self):
+        """The workload cannot read charm config, so the decision is passed in."""
+        env = workload._oauth_environment(_charm(provider=PROVIDER, public_url="https://mcp.example.com"))
+
+        assert env["MCP_AUTH_CLIENT_REGISTRATION"] == "true"
+
+    def test_reports_registration_turned_off(self):
+        """Off is the setting that changes who the deployment serves, so it has to arrive."""
+        charm = _charm(provider=PROVIDER, public_url="https://mcp.example.com", registration=False)
+
+        assert workload._oauth_environment(charm)["MCP_AUTH_CLIENT_REGISTRATION"] == "false"
 
     def test_carries_the_issuer_for_discovery(self):
         """Clients are pointed at the authorization server after a 401."""

@@ -93,6 +93,15 @@ requires:
 
 config:
   options:
+    enable-client-registration:
+      description: |
+        Let callers obtain an OAuth client of their own, by registering with
+        this server when it fronts Google or with the identity provider.
+        This is how a caller on a developer's machine (e.g., VSCode Copilot)
+        connects, so turning it off limits the callers to ones registered
+        with the deployment's own client credentials (e.g., Gemini Enterprise).
+      type: boolean
+      default: true
     enable-mutation-tools:
       description: |
         Expose the DataHub mutation tools (tags, glossary terms, owners, domains,

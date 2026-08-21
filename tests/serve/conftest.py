@@ -196,6 +196,7 @@ def oauth_env(monkeypatch):
             "MCP_AUTH_CLIENT_ID",
             "MCP_AUTH_CLIENT_SECRET",
             "MCP_AUTH_BASE_URL",
+            "MCP_AUTH_CLIENT_REGISTRATION",
         ):
             monkeypatch.delenv(name, raising=False)
         for name, value in overrides.items():

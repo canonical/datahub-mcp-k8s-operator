@@ -68,6 +68,8 @@ def _oauth_environment(charm) -> Dict[str, str]:
         "MCP_AUTH_CLIENT_ID": provider.client_id,
         "MCP_AUTH_CLIENT_SECRET": provider.client_secret,
         "MCP_AUTH_BASE_URL": public_url.rstrip("/"),
+        # Off leaves only the callers an operator registered up front
+        "MCP_AUTH_CLIENT_REGISTRATION": str(charm.config.enable_client_registration).lower(),
     }
 
 
