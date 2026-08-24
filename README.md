@@ -88,16 +88,18 @@ Google publishes no registration endpoint, so a client pointed at it has no way 
 
 This also fixes the redirect URI. MCP clients listen on an ephemeral loopback port that changes per attempt, which can never match a pre-registered entry. With the proxy, Google only ever redirects to the server's own fixed callback, and the proxy forwards to whichever port the caller chose.
 
+Not every caller can use the proxy. A client that reads `/.well-known/oauth-protected-resource` finds it and configures itself; one that is set up by hand from a form never looks, and is given Google's own endpoints instead. That client authenticates directly at Google and arrives holding a Google token rather than one the proxy minted, so the server also accepts a token Google confirms was issued to the client this deployment owns. [Gemini Enterprise](#gemini-enterprise) connects that way, and its connector offers no other.
+
 In the Google Cloud console, per environment:
 
 1. Create an OAuth client of type **Web application**. A desktop client is not needed, the secret stays on the server and never reaches users.
-2. Add exactly one authorised redirect URI: `https://<your-hostname>/auth/callback`.
+2. Add `https://<your-hostname>/auth/callback` as an authorised redirect URI. Add the redirect URI of any client configured by hand alongside it, since it authenticates at Google directly rather than through the server's callback.
 3. Put that client's ID and secret on the `oauth-external-idp-integrator` for this deployment. Redirect URIs are per client, so this must be an integrator carrying that client, not one shared with another application.
 
 Two consequences worth knowing:
 
 - **The workload needs egress to `oauth2.googleapis.com`**, because it exchanges the authorization code and validates tokens server-side. Behind a filtering proxy, allowlist that host; the charm forwards the model's `juju-http-proxy`, `juju-https-proxy` and `juju-no-proxy` settings to the workload.
-- **Run a single unit.** The proxy is the authorization server, and it holds its client registrations and issued tokens in the unit. A second unit would not recognise the first one's tokens. Providers that register clients themselves have no such state and scale normally.
+- **Run a single unit.** The proxy is the authorization server, and it holds its client registrations and issued tokens in the unit, so a second unit would not recognise the first one's tokens and a restarted unit does not recognise its own. Callers that discover the proxy sign in again when that happens; a caller pointed at Google by hand holds a token no unit had to issue and is unaffected. Providers that register clients themselves have no such state and scale normally.
 
 ClientID Metadata Documents (CIMD), where a caller names a URL it hosts instead of registering, are deliberately not offered. Serving them means fetching a URL the caller chooses, from a domain that differs per client which a deployment behind a filtering egress proxy cannot do. Registration requires no outbound call and works everywhere.
 
@@ -111,7 +113,25 @@ By default a caller may obtain an OAuth client of its own. That is how an MCP cl
 juju config datahub-mcp-k8s enable-client-registration=false
 ```
 
-A caller configured that way needs no charm configuration of its own. It presents the client this deployment already holds, which the server recognises without a registration. Gemini Enterprise connects this way: it is given the endpoint's `/authorize` and `/token` URLs together with the same client ID and secret that are on the `oauth` relation.
+A caller configured that way needs no charm configuration of its own. It presents the client this deployment already holds, which the server recognises without a registration.
+
+Where the rule is enforced follows from who does the registering:
+
+- **Fronting Google**, this server is the registrar. It stops serving `/register`, stops advertising it in the authorization server metadata, and resolves no client but its own, so callers that registered while it was on are cut off along with new ones. A caller holding a Google token is held to the same rule by the client Google names on it.
+- **Against a provider that registers clients itself**, registration happens at the provider and the charm cannot stop it. It instead refuses any token whose `client_id` or `azp` claim is not this deployment's client.
+
+#### Gemini Enterprise
+
+Gemini Enterprise's custom MCP connector does no discovery: an admin types the endpoints into a form. Give it **Google's** endpoints, not this server's, because that is where such a client authenticates:
+
+| Field | Value |
+| --- | --- |
+| MCP Server URL | `https://<your-hostname>/mcp` |
+| Authorization URL | `https://accounts.google.com/o/oauth2/auth` |
+| Token URL | `https://oauth2.googleapis.com/token` |
+| Client ID / Client Secret | The same Google client that is on the `oauth` relation |
+
+The client that deployment owns must carry `https://vertexaisearch.cloud.google.com/oauth-redirect` among its authorised redirect URIs, which is where Google sends the user back to Gemini. Nothing else on the charm needs changing, and this works whether or not client registration is enabled: what admits the caller is the client its token names, which is the one an operator gave it.
 
 ### Mutation tools
 

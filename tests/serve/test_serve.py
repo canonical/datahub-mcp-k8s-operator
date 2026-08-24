@@ -465,6 +465,191 @@ class TestRegistrationDisabledAtTheProvider:
         assert "offline_access" in document["scopes_supported"]
 
 
+class TestGoogleIssuedTokenVerifier:
+    """Tests for the check on a token a caller obtained from Google itself.
+
+    A caller configured by hand never reaches the proxy's own token endpoint, so
+    what it presents is whatever Google gave it. These cover what that has to
+    say for itself to be accepted.
+    """
+
+    def _verifier(self):
+        """Return the verifier the Google proxy falls back to.
+
+        Returns:
+            A GoogleIssuedTokenVerifier demanding what the proxy demands.
+        """
+        return serve.GoogleIssuedTokenVerifier(client_id=CLIENT_ID, required_scopes=["openid"])
+
+    def _tokeninfo(self, **claims):
+        """Answer the tokeninfo endpoint with a token issued to our client.
+
+        Args:
+            claims: Claims overriding the defaults.
+
+        Returns:
+            The mocked route.
+        """
+        body = {"aud": CLIENT_ID, "azp": CLIENT_ID, "sub": "a-user", "scope": "openid"}
+        body.update(claims)
+        return respx.get(GOOGLE_TOKENINFO).mock(return_value=httpx.Response(200, json=body))
+
+    @respx.mock
+    def test_accepts_a_token_issued_to_our_client(self):
+        """This is the caller an operator gave this deployment's client to."""
+        self._tokeninfo()
+
+        access = _verify(self._verifier())
+
+        assert access is not None
+        assert access.client_id == CLIENT_ID
+
+    @respx.mock
+    def test_accepts_a_token_naming_our_client_as_the_authorized_party(self):
+        """`azp` and `aud` are separate claims, and either one naming us is enough."""
+        self._tokeninfo(aud="some-other-app")
+
+        assert _verify(self._verifier()) is not None
+
+    @respx.mock
+    def test_rejects_a_token_issued_to_another_application(self):
+        """Without this any Google token from any app would open the endpoint."""
+        self._tokeninfo(aud="some-other-app", azp="some-other-app")
+
+        assert _verify(self._verifier()) is None
+
+    @respx.mock
+    def test_rejects_a_token_that_asked_for_too_little(self):
+        """The proxy demands these scopes of its own tokens, so this demands them too."""
+        self._tokeninfo(scope="https://www.googleapis.com/auth/userinfo.email")
+
+        assert _verify(self._verifier()) is None
+
+    @respx.mock
+    def test_rejects_a_token_google_does_not_recognise(self):
+        """An expired or revoked token is what Google answers this way."""
+        respx.get(GOOGLE_TOKENINFO).mock(return_value=httpx.Response(400, json={"error": "invalid_token"}))
+
+        assert _verify(self._verifier()) is None
+
+    @respx.mock
+    def test_an_unreachable_endpoint_refuses_rather_than_admits(self):
+        """A provider being briefly unwell is not evidence that a token is good."""
+        respx.get(GOOGLE_TOKENINFO).mock(side_effect=httpx.ConnectError("no route"))
+
+        assert _verify(self._verifier()) is None
+
+    @respx.mock
+    def test_the_expiry_google_reports_is_carried_over(self):
+        """The token stops working when Google says it does, not when we notice."""
+        self._tokeninfo(exp="2000000000")
+
+        assert _verify(self._verifier()).expires_at == 2000000000
+
+    @respx.mock
+    def test_a_token_without_an_expiry_is_still_usable(self):
+        """The claim is optional, and its absence says nothing against the token."""
+        self._tokeninfo()
+
+        assert _verify(self._verifier()).expires_at is None
+
+
+class TestTokenIssuedByGoogleDirectly:
+    """Tests for the proxy honouring a token it did not mint.
+
+    A caller can be configured with Google's own endpoints rather than this
+    server's, so it authenticates at Google and arrives holding a Google token.
+    The proxy looks for one of its own first and has to fall back rather than
+    reject it.
+    """
+
+    def _provider(self, oauth_env, registration):
+        """Return the routed Google provider the entrypoint builds.
+
+        Args:
+            oauth_env: Fixture setting the entrypoint's environment.
+            registration: What the charm set the switch to.
+
+        Returns:
+            The provider, with its routes built so its own token check works.
+        """
+        oauth_env(
+            client_id=CLIENT_ID,
+            client_secret="s3cret",  # nosec B106
+            issuer=GOOGLE_ISSUER,
+            base_url=BASE_URL,
+            introspection_url=GOOGLE_TOKENINFO,
+            client_registration=registration,
+        )
+        provider = serve._auth_provider()
+        provider.get_routes("/mcp")
+        return provider
+
+    def _tokeninfo(self, **claims):
+        """Answer the tokeninfo endpoint with a token issued to our client.
+
+        Args:
+            claims: Claims overriding the defaults.
+
+        Returns:
+            The mocked route.
+        """
+        body = {"aud": CLIENT_ID, "azp": CLIENT_ID, "sub": "a-user", "scope": "openid"}
+        body.update(claims)
+        return respx.get(GOOGLE_TOKENINFO).mock(return_value=httpx.Response(200, json=body))
+
+    @pytest.mark.parametrize("registration", ["true", "false"])
+    @respx.mock
+    def test_a_token_google_issued_to_our_client_is_accepted(self, oauth_env, registration):
+        """A caller configured by hand has no way to obtain a token of ours.
+
+        Args:
+            oauth_env: Fixture setting the entrypoint's environment.
+            registration: What the charm set the switch to.
+        """
+        self._tokeninfo()
+
+        access = asyncio.run(self._provider(oauth_env, registration).verify_token("a-google-token"))
+
+        assert access is not None
+        assert access.client_id == CLIENT_ID
+
+    @pytest.mark.parametrize("registration", ["true", "false"])
+    @respx.mock
+    def test_a_token_google_issued_to_another_application_is_refused(self, oauth_env, registration):
+        """Falling back must not turn the endpoint into one any Google token opens.
+
+        Args:
+            oauth_env: Fixture setting the entrypoint's environment.
+            registration: What the charm set the switch to.
+        """
+        self._tokeninfo(aud="some-other-app", azp="some-other-app")
+
+        assert asyncio.run(self._provider(oauth_env, registration).verify_token("a-google-token")) is None
+
+    @respx.mock
+    def test_a_token_from_nowhere_is_still_refused(self, oauth_env):
+        """Neither check recognises it, so the fallback must not be a way past both.
+
+        Args:
+            oauth_env: Fixture setting the entrypoint's environment.
+        """
+        respx.get(GOOGLE_TOKENINFO).mock(return_value=httpx.Response(400, json={"error": "invalid_token"}))
+
+        assert asyncio.run(self._provider(oauth_env, "false").verify_token("not-a-token")) is None
+
+    def test_the_fallback_is_reached_through_the_proxy_and_not_around_it(self, oauth_env):
+        """The proxy answers first, so its own tokens keep working unchanged.
+
+        Args:
+            oauth_env: Fixture setting the entrypoint's environment.
+        """
+        provider = self._provider(oauth_env, "false")
+
+        assert isinstance(provider, serve.DirectGoogleTokenProxy)
+        assert isinstance(provider._direct_verifier, serve.GoogleIssuedTokenVerifier)
+
+
 class TestOwnClientOnlyVerifier:
     """Tests for the check that a token belongs to the client this deployment owns."""
 
