@@ -20,8 +20,14 @@ charmlibs-pydeps = [
     "jsonschema~=4.23",
 ]
 
+# The type checker, shared by every environment that runs it.
+typecheck = [
+    "mypy==1.20.1",
+]
+
 # Dependencies for linting and formatting.
 lint = [
+    {include-group = "typecheck"},
     "black==26.3.1",
     "codespell==2.4.2",
     "flake8==7.0.0",
@@ -31,7 +37,6 @@ lint = [
     "flake8-docstrings-complete==1.4.1",
     "flake8-test-docs==1.0.8",
     "isort==8.0.1",
-    "mypy==1.20.1",
     "pep8-naming==0.15.1",
     "pydocstyle==6.3.0",
     "pylint==4.0.5",
@@ -55,6 +60,7 @@ unit = [
 
 # Dependencies for the rock entrypoint tests, which run the workload's own package.
 serve = [
+    {include-group = "typecheck"},
     "mcp-server-datahub==0.6.0; python_version >= '3.11'",
     "pytest==9.0.3",
     "requests==2.32.3",

@@ -11,22 +11,37 @@ that registers clients on demand is advertised to callers directly. Google does
 not, so it is fronted by an **OAuth proxy**: an authorization server of our own
 that registers callers itself and forwards them upstream. See `_auth_provider`.
 
+A caller can self-register on the spot and come away with a client nobody provisioned.
+Or an operator registers it up front and pastes the credentials in by presenting
+the client this deployment already owns, so nothing needs to be configured here.
+Turning registration off leaves only the second kind, which is how a deployment
+is limited to the callers an operator set up. See `_client_registration_enabled`.
+
+The proxy only serves callers that discover it. A caller configured by hand is
+pointed at Google's own endpoints instead and arrives holding a token Google
+issued, which the proxy would otherwise refuse as none of its own. Both kinds
+are honoured. See `DirectGoogleTokenProxy`.
+
 Client authentication is off unless `MCP_AUTH_ISSUER` is set. The charm sets it,
 and the variables below, from the `oauth` relation:
 
-    MCP_AUTH_ISSUER             Identity provider that issues valid tokens.
-    MCP_AUTH_JWT_ACCESS_TOKEN   "true" when the provider issues signed tokens.
-    MCP_AUTH_JWKS_URL           Where to fetch the provider's signing keys.
-    MCP_AUTH_INTROSPECTION_URL  Endpoint used to check an unsigned token.
-    MCP_AUTH_CLIENT_ID          This deployment's OAuth client.
-    MCP_AUTH_CLIENT_SECRET      Credential for calling the validation endpoint.
-    MCP_AUTH_BASE_URL           Public URL of this server, advertised to clients.
+    MCP_AUTH_ISSUER               Identity provider that issues valid tokens.
+    MCP_AUTH_JWT_ACCESS_TOKEN     "true" when the provider issues signed tokens.
+    MCP_AUTH_JWKS_URL             Where to fetch the provider's signing keys.
+    MCP_AUTH_INTROSPECTION_URL    Endpoint used to check an unsigned token.
+    MCP_AUTH_CLIENT_ID            This deployment's OAuth client.
+    MCP_AUTH_CLIENT_SECRET        Credential for calling the validation endpoint.
+    MCP_AUTH_BASE_URL             Public URL of this server, advertised to clients.
+    MCP_AUTH_CLIENT_REGISTRATION  "false" to serve only callers presenting this
+                                  deployment's own client. Defaults to allowing
+                                  callers to register their own.
 """
 
 import os
 from typing import Any, List, Optional
 from urllib.parse import urlparse
 
+import httpx
 from fastmcp.server.auth.auth import AccessToken, RemoteAuthProvider, TokenVerifier
 from fastmcp.server.auth.providers.google import GoogleProvider
 from fastmcp.server.auth.providers.introspection import IntrospectionTokenVerifier
@@ -35,9 +50,22 @@ from mcp_server_datahub.__main__ import create_app
 
 # Google checks tokens through its own endpoint instead of the standard one.
 GOOGLE_TOKENINFO_HOST = "oauth2.googleapis.com"
+GOOGLE_TOKENINFO_URL = f"https://{GOOGLE_TOKENINFO_HOST}/tokeninfo"
+GOOGLE_TOKENINFO_TIMEOUT = 10
 
 # Advertised to clients so they know what to ask the provider for.
 ADVERTISED_SCOPES = ["openid", "profile", "email"]
+
+# Google implements offline access as an authorization parameter rather than a
+# scope and rejects `offline_access` outright, so it is advertised everywhere
+# except in front of Google. A client an operator registered up front needs it:
+# it is the standard way to ask for the refresh token that keeps a connection
+# alive without a person present to sign in again.
+OFFLINE_ACCESS_SCOPE = "offline_access"
+
+# Claims that name the client a token was issued to. `client_id` is what
+# introspection returns; `azp` is what an OIDC provider puts on a signed token.
+CLIENT_ID_CLAIMS = ("client_id", "azp")
 
 
 def _audience_matches(claim: Any, expected: List[str]) -> bool:
@@ -54,6 +82,237 @@ def _audience_matches(claim: Any, expected: List[str]) -> bool:
         return False
     values = claim if isinstance(claim, list) else [claim]
     return any(value in expected for value in values)
+
+
+def _client_registration_enabled() -> bool:
+    """Return whether callers may obtain a client of their own.
+
+    Enabled is the default, because a deployment that turns it off serves only
+    the callers an operator set up by hand, which is a decision rather than a
+    starting point.
+
+    Returns:
+        False only when the charm explicitly disabled registration.
+    """
+    return (os.getenv("MCP_AUTH_CLIENT_REGISTRATION") or "true").lower() != "false"
+
+
+class OwnClientOnlyVerifier(TokenVerifier):
+    """Accept only tokens the provider issued to this deployment's client.
+
+    The provider decides who may register with it, and a provider that hands
+    out clients freely will happily mint tokens for a caller this deployment
+    knows nothing about. Those tokens carry the same issuer and, where the
+    provider sets one, can carry the same audience, so the only thing that
+    tells them apart is the client they were issued to.
+
+    This wraps whichever verifier checks the token itself, so the rule reads
+    the same whether tokens are signed or introspected.
+    """
+
+    def __init__(self, verifier: TokenVerifier, client_id: str):
+        """Construct.
+
+        Args:
+            verifier: The check the token must pass first.
+            client_id: This deployment's own OAuth client.
+        """
+        super().__init__(required_scopes=verifier.required_scopes)
+        self._verifier = verifier
+        self._client_id = client_id
+
+    async def verify_token(self, token: str) -> Optional[AccessToken]:
+        """Return the token's details, or None when it is not usable.
+
+        Args:
+            token: The bearer token presented by the client.
+
+        Returns:
+            An AccessToken when the token is valid and was issued to this
+            deployment's client, otherwise None.
+        """
+        access = await self._verifier.verify_token(token)
+        if access is None:
+            return None
+
+        claims = access.claims or {}
+        presented = next((claims[name] for name in CLIENT_ID_CLAIMS if claims.get(name)), None)
+        # A token naming no client cannot be shown to belong to ours, and this
+        # deployment asked to serve only ours, so it is refused.
+        if presented != self._client_id:
+            return None
+        return access
+
+
+class GoogleIssuedTokenVerifier(TokenVerifier):
+    """Accept a token Google issued to this deployment's client.
+
+    Google's access tokens are opaque, so they are checked by asking Google
+    about them. The answer names the client the token was issued to, and only
+    a caller holding that client's credentials could have obtained one, so that
+    is what limits the endpoint to the callers an operator set up.
+    """
+
+    def __init__(self, client_id: str, required_scopes: List[str]):
+        """Construct.
+
+        Args:
+            client_id: This deployment's own OAuth client.
+            required_scopes: Scopes a token must carry to be usable.
+        """
+        super().__init__(required_scopes=required_scopes)
+        self._client_id = client_id
+
+    async def verify_token(self, token: str) -> Optional[AccessToken]:
+        """Return the token's details, or None when it is not usable.
+
+        Args:
+            token: The bearer token presented by the client.
+
+        Returns:
+            An AccessToken when Google recognises the token and issued it to
+            this deployment's client, otherwise None.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=GOOGLE_TOKENINFO_TIMEOUT) as client:
+                response = await client.get(GOOGLE_TOKENINFO_URL, params={"access_token": token})
+            if response.status_code != 200:
+                return None
+            claims = response.json()
+        except (httpx.RequestError, ValueError):
+            # An endpoint that did not answer, or did not answer with JSON, has
+            # not told us the token is good, so it is refused rather than let
+            # through on the assumption that Google is temporarily unavailable.
+            return None
+
+        # `aud` is the client the token was issued to and `azp` the one that
+        # asked for it. For a caller going through this deployment's client the
+        # two agree, but they are separate claims and either one naming us is
+        # enough.
+        if self._client_id not in (claims.get("aud"), claims.get("azp")):
+            return None
+
+        scopes = (claims.get("scope") or "").split()
+        if not set(self.required_scopes).issubset(scopes):
+            return None
+
+        expires_at = None
+        if claims.get("exp"):
+            try:
+                expires_at = int(claims["exp"])
+            except (TypeError, ValueError):
+                expires_at = None
+
+        return AccessToken(
+            token=token,
+            client_id=self._client_id,
+            scopes=scopes,
+            expires_at=expires_at,
+            claims=claims,
+        )
+
+
+class DirectGoogleTokenProxy(GoogleProvider):  # pylint: disable=too-many-ancestors
+    """OAuth proxy that also honours a token Google issued directly.
+
+    A caller that follows the MCP specification discovers this server as its
+    authorization server, obtains a client from it and comes away holding a
+    token this proxy minted. A caller configured by hand does not discover
+    anything: it is given Google's own authorization and token endpoints
+    together with this deployment's client, so it authenticates at Google and
+    arrives holding a token Google minted.
+
+    The proxy on its own refuses that token, because it looks for one of its own
+    and finds no signature it recognises, which is a rejected request rather
+    than a failed sign-in: the caller authenticates at Google perfectly well and
+    is then told its token is invalid. Asking Google about it instead covers
+    both, and establishes the same thing the proxy establishes about the tokens
+    it mints itself, namely that the caller went through the client this
+    deployment owns.
+    """
+
+    def __init__(self, *, client_id: str, **kwargs):
+        """Construct.
+
+        Args:
+            client_id: This deployment's own OAuth client.
+            kwargs: Passed through to GoogleProvider.
+        """
+        super().__init__(client_id=client_id, **kwargs)
+        # The same scopes the proxy demands of the tokens it issues, so which
+        # endpoint a caller was pointed at does not change what it must ask for.
+        self._direct_verifier = GoogleIssuedTokenVerifier(client_id=client_id, required_scopes=self.required_scopes)
+
+    async def load_access_token(self, token: str) -> Optional[Any]:
+        """Return what the bearer token authorizes, or None when it authorizes nothing.
+
+        Args:
+            token: The bearer token presented by the client.
+
+        Returns:
+            An AccessToken from whichever check recognises the token, otherwise
+            None.
+        """
+        access = await super().load_access_token(token)
+        if access is not None:
+            return access
+        return await self._direct_verifier.verify_token(token)
+
+
+class OwnClientOnlyProxy(DirectGoogleTokenProxy):  # pylint: disable=too-many-ancestors
+    """OAuth proxy that resolves no client but the one this deployment holds.
+
+    Withdrawing the registration endpoint stops a caller from obtaining a client
+    it does not have, but it says nothing about the ones already handed out. The
+    proxy keeps the registrations it issued, and `/authorize` and `/token` never
+    consult the registration switch, so a caller that registered while it was on
+    keeps working afterwards for as long as that record survives.
+
+    Refusing to resolve any other client closes that. Every route that acts on
+    behalf of a client looks it up here first: the authorize handler directly,
+    and the token endpoint through the client authentication that guards it, so
+    a code exchange and a refresh are both refused along with the rest.
+
+    The inherited check on a token Google issued needs nothing added: it already
+    admits only the client this deployment owns, which is the same rule read off
+    the token rather than off the registration.
+    """
+
+    def __init__(self, *, client_id: str, **kwargs):
+        """Construct.
+
+        Args:
+            client_id: This deployment's own OAuth client, the only one served.
+            kwargs: Passed through to GoogleProvider.
+
+        Raises:
+            ValueError: If the proxy holds no registration options to withdraw,
+                which would leave it registering callers this refuses to serve.
+        """
+        super().__init__(client_id=client_id, **kwargs)
+        self._own_client_id = client_id
+        # The proxy turns registration on unconditionally, so it is withdrawn
+        # here. Both the route and the metadata entry advertising it are built
+        # from these options at startup, so a caller is told registration is
+        # unavailable rather than left to discover a 404.
+        options = self.client_registration_options
+        if options is None:
+            raise ValueError("the OAuth proxy exposed no client registration options to withdraw")
+        options.enabled = False
+
+    async def get_client(self, client_id: str) -> Optional[Any]:
+        """Return the registered client with this identifier, if it is ours.
+
+        Args:
+            client_id: The client an incoming request claims to be.
+
+        Returns:
+            The client when it is this deployment's own, otherwise None, which
+            the routes above report as an invalid client.
+        """
+        if client_id != self._own_client_id:
+            return None
+        return await super().get_client(client_id)
 
 
 class CheckedIntrospectionVerifier(IntrospectionTokenVerifier):
@@ -125,43 +384,49 @@ def _required(name: str) -> str:
 def _token_verifier(base_url: str) -> TokenVerifier:
     """Build the token check for a provider that registers clients itself.
 
-    Every path out of here either returns a verifier or raises. There is
-    deliberately no "could not build one" return value: the caller has already
-    established that this deployment authenticates its callers, and answering
-    it with nothing would serve the catalog to anyone who can reach the port.
+    Every path out of here either returns a verifier or stops the process:
+    `_required` raises when the environment names an issuer but describes no way
+    to check a token against it. There is deliberately no "could not build one"
+    return value, because the caller has already established that this
+    deployment authenticates its callers, and answering it with nothing would
+    serve the catalog to anyone who can reach the port.
 
     Args:
         base_url: Public base URL of this server.
 
     Returns:
         A TokenVerifier.
-
-    Raises:
-        ValueError: If the environment names an issuer but describes no way to
-            check a token against it.
     """
     client_id = _required("MCP_AUTH_CLIENT_ID")
     # A token issued for us names either this server or the client it was
     # issued through, depending on what the provider supports.
     audiences = [client_id, base_url]
 
+    verifier: TokenVerifier
     # Signed tokens prove themselves, so they are checked here against the
     # provider's public keys rather than by asking the provider every time.
     if os.getenv("MCP_AUTH_JWT_ACCESS_TOKEN") == "true":
-        return JWTVerifier(
+        verifier = JWTVerifier(
             jwks_uri=_required("MCP_AUTH_JWKS_URL"),
             issuer=_required("MCP_AUTH_ISSUER"),
             audience=audiences,
             base_url=base_url,
         )
+    else:
+        verifier = CheckedIntrospectionVerifier(
+            audiences=audiences,
+            introspection_url=_required("MCP_AUTH_INTROSPECTION_URL"),
+            client_id=client_id,
+            client_secret=_required("MCP_AUTH_CLIENT_SECRET"),
+            base_url=base_url,
+        )
 
-    return CheckedIntrospectionVerifier(
-        audiences=audiences,
-        introspection_url=_required("MCP_AUTH_INTROSPECTION_URL"),
-        client_id=client_id,
-        client_secret=_required("MCP_AUTH_CLIENT_SECRET"),
-        base_url=base_url,
-    )
+    # Registration happens at the provider here rather than at this server, so
+    # refusing to serve self-registered callers is a question of which tokens
+    # are honoured rather than of which routes are published.
+    if not _client_registration_enabled():
+        return OwnClientOnlyVerifier(verifier, client_id)
+    return verifier
 
 
 def _auth_provider():
@@ -177,7 +442,15 @@ def _auth_provider():
     endpoint, so pointing callers at it leaves them with no way to obtain a
     client which is why Google is fronted by an OAuth proxy instead. The proxy
     is an authorization server in its own right: callers register with it and it
-    holds the single Google client the deployment owns.
+    holds the single Google client the deployment owns. A caller that cannot
+    discover it and is pointed at Google by hand is honoured too, on the
+    strength of the client Google says its token was issued to.
+
+    Where registration is turned off, that difference decides where the rule is
+    enforced. In front of Google this server is the registrar, so it serves only
+    the client it holds, which is exactly the one an operator pastes into a
+    caller they provisioned. Elsewhere the provider is the registrar and this
+    server cannot stop it, so it refuses the resulting tokens instead.
 
     Returns:
         An auth provider, or None when client authentication is disabled.
@@ -194,7 +467,8 @@ def _auth_provider():
         # caller happens to be listening on. That is what lets a deployment
         # register one fixed redirect URI with Google and serve every caller
         # with it.
-        return GoogleProvider(
+        proxy = DirectGoogleTokenProxy if _client_registration_enabled() else OwnClientOnlyProxy
+        return proxy(
             client_id=_required("MCP_AUTH_CLIENT_ID"),
             client_secret=_required("MCP_AUTH_CLIENT_SECRET"),
             base_url=base_url,
@@ -209,7 +483,7 @@ def _auth_provider():
         token_verifier=_token_verifier(base_url),
         authorization_servers=[issuer],
         base_url=base_url,
-        scopes_supported=ADVERTISED_SCOPES,
+        scopes_supported=ADVERTISED_SCOPES + [OFFLINE_ACCESS_SCOPE],
         resource_name="DataHub MCP Server",
     )
 
@@ -225,9 +499,11 @@ def main():
     # OAuth proxy is itself the authorization server, and it keeps its client
     # registrations and the tokens it issued on local disk. A replica recognises
     # only what it issued itself, so a request balanced to a different one is
-    # rejected: run a single replica when fronting Google. Every other provider
-    # is scalable, because there the token is checked against the provider
-    # rather than against anything held here.
+    # rejected: run a single replica when fronting Google. A caller pointed at
+    # Google by hand holds a token no replica had to issue, so it is unaffected,
+    # but the callers that discover the proxy are. Every other provider is
+    # scalable, because there the token is checked against the provider rather
+    # than against anything held here.
     mcp.run(transport="http", stateless_http=True, show_banner=False)
 
 
