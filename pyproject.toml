@@ -63,7 +63,7 @@ serve = [
     {include-group = "typecheck"},
     "mcp-server-datahub==0.6.0; python_version >= '3.11'",
     "pytest==9.0.3",
-    "requests==2.32.3",
+    "requests==2.33.0",
     "respx==0.22.0",
 ]
 
@@ -71,7 +71,7 @@ serve = [
 integration = [
     "jubilant==1.8.0",
     "pytest==9.0.3",
-    "requests==2.32.3",
+    "requests==2.33.0",
 ]
 
 [tool.bandit]
