@@ -43,4 +43,5 @@ header:
     - 'uv.lock'
     - '.python-version'
     - 'lib/charms/**'
+    - 'apm.lock.yaml'
   comment: on-failure
