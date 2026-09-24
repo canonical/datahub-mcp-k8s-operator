@@ -44,4 +44,5 @@ header:
     - '.python-version'
     - 'lib/charms/**'
     - 'apm.lock.yaml'
+    - '**/keyring_broker.py'
   comment: on-failure
