@@ -357,11 +357,13 @@ class TestRegistrationDisabledInFrontOfGoogle:
 
         assert response.status_code == 404
 
-    def test_a_caller_registered_up_front_keeps_its_way_in(self, oauth_env):
-        """The point is to leave exactly this caller, so it has to survive.
+    def test_authorize_and_token_stay_advertised_when_restricted(self, oauth_env):
+        """Withdrawing registration doesn't withdraw the proxy's other routes.
 
-        The client held here is recognised without a registration, which is what
-        an operator pastes into a caller they provisioned.
+        A hand-configured caller never discovers this document at all — it
+        authenticates at Google directly instead — so this only covers a
+        caller that does, confirming the proxy still presents as a valid
+        OAuth server rather than disappearing along with registration.
         """
         client = TestClient(self._app(oauth_env, "false"))
 
@@ -378,14 +380,18 @@ class TestRegistrationDisabledInFrontOfGoogle:
 
         assert document["registration_endpoint"] == f"{BASE_URL}/register"
 
-    def test_the_client_held_here_still_resolves(self, oauth_env):
-        """Authorize and token both look the client up, so ours has to be found."""
+    def test_this_deployment_s_own_client_is_refused_too(self, oauth_env):
+        """GoogleProvider would otherwise synthesize a public client for it.
+
+        That synthesized client needs no secret and has no redirect-URI
+        restriction, and this client_id isn't actually secret either, so
+        honouring it here would leave restricted mode bypassable by anyone
+        who knows it. A caller configured by hand doesn't need this path:
+        it authenticates at Google directly instead.
+        """
         provider = self._provider(oauth_env, "false")
 
-        client = asyncio.run(provider.get_client(CLIENT_ID))
-
-        assert client is not None
-        assert client.client_id == CLIENT_ID
+        assert asyncio.run(provider.get_client(CLIENT_ID)) is None
 
     def test_a_caller_that_registered_earlier_is_cut_off(self, oauth_env):
         """Withdrawing the route leaves the registrations already handed out.

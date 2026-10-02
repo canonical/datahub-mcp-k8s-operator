@@ -260,7 +260,7 @@ class DirectGoogleTokenProxy(GoogleProvider):  # pylint: disable=too-many-ancest
 
 
 class OwnClientOnlyProxy(DirectGoogleTokenProxy):  # pylint: disable=too-many-ancestors
-    """OAuth proxy that resolves no client but the one this deployment holds.
+    """OAuth proxy that resolves no client at all through get_client().
 
     Withdrawing the registration endpoint stops a caller from obtaining a client
     it does not have, but it says nothing about the ones already handed out. The
@@ -268,21 +268,27 @@ class OwnClientOnlyProxy(DirectGoogleTokenProxy):  # pylint: disable=too-many-an
     consult the registration switch, so a caller that registered while it was on
     keeps working afterwards for as long as that record survives.
 
-    Refusing to resolve any other client closes that. Every route that acts on
+    Refusing to resolve any client here closes that. Every route that acts on
     behalf of a client looks it up here first: the authorize handler directly,
     and the token endpoint through the client authentication that guards it, so
-    a code exchange and a refresh are both refused along with the rest.
+    a code exchange and a refresh are both refused along with the rest. This
+    includes this deployment's own client_id: GoogleProvider synthesizes a
+    public client for it on the fly (no secret, no redirect-URI check) as a
+    DCR-skip convenience, and that id isn't actually secret, so letting it
+    through here would leave this mode bypassable by anyone who knows it.
 
-    The inherited check on a token Google issued needs nothing added: it already
-    admits only the client this deployment owns, which is the same rule read off
-    the token rather than off the registration.
+    A caller configured by hand doesn't need this path at all: it authenticates
+    at Google directly and arrives holding a token Google minted, which the
+    inherited check on a token Google issued verifies on its own — it already
+    admits only the client this deployment owns, read off the token rather than
+    off the registration.
     """
 
     def __init__(self, *, client_id: str, **kwargs):
         """Construct.
 
         Args:
-            client_id: This deployment's own OAuth client, the only one served.
+            client_id: This deployment's own OAuth client.
             kwargs: Passed through to GoogleProvider.
 
         Raises:
@@ -290,7 +296,6 @@ class OwnClientOnlyProxy(DirectGoogleTokenProxy):  # pylint: disable=too-many-an
                 which would leave it registering callers this refuses to serve.
         """
         super().__init__(client_id=client_id, **kwargs)
-        self._own_client_id = client_id
         # The proxy turns registration on unconditionally, so it is withdrawn
         # here. Both the route and the metadata entry advertising it are built
         # from these options at startup, so a caller is told registration is
@@ -301,18 +306,15 @@ class OwnClientOnlyProxy(DirectGoogleTokenProxy):  # pylint: disable=too-many-an
         options.enabled = False
 
     async def get_client(self, client_id: str) -> Optional[Any]:
-        """Return the registered client with this identifier, if it is ours.
+        """Return None: no client resolves while registration is withdrawn.
 
         Args:
             client_id: The client an incoming request claims to be.
 
         Returns:
-            The client when it is this deployment's own, otherwise None, which
-            the routes above report as an invalid client.
+            None, always — which the routes above report as an invalid client.
         """
-        if client_id != self._own_client_id:
-            return None
-        return await super().get_client(client_id)
+        return None
 
 
 class CheckedIntrospectionVerifier(IntrospectionTokenVerifier):
