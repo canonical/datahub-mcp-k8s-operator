@@ -14,8 +14,10 @@ that registers callers itself and forwards them upstream. See `_auth_provider`.
 A caller can self-register on the spot and come away with a client nobody provisioned.
 Or an operator registers it up front and pastes the credentials in by presenting
 the client this deployment already owns, so nothing needs to be configured here.
-Turning registration off leaves only the second kind, which is how a deployment
-is limited to the callers an operator set up. See `_client_registration_enabled`.
+Turning registration off withdraws both: the proxy refuses every client
+through `/authorize` and `/token`, even this deployment's own. What survives
+is the caller pointed directly at Google, described next.
+See `_client_registration_enabled`.
 
 The proxy only serves callers that discover it. A caller configured by hand is
 pointed at Google's own endpoints instead and arrives holding a token Google
@@ -32,9 +34,9 @@ and the variables below, from the `oauth` relation:
     MCP_AUTH_CLIENT_ID            This deployment's OAuth client.
     MCP_AUTH_CLIENT_SECRET        Credential for calling the validation endpoint.
     MCP_AUTH_BASE_URL             Public URL of this server, advertised to clients.
-    MCP_AUTH_CLIENT_REGISTRATION  "false" to serve only callers presenting this
-                                  deployment's own client. Defaults to allowing
-                                  callers to register their own.
+    MCP_AUTH_CLIENT_REGISTRATION  "false" to refuse callers that have not been
+                                  set up by an operator ahead of time. Defaults
+                                  to allowing callers to register their own.
 """
 
 import os
@@ -436,10 +438,13 @@ def _auth_provider():
     strength of the client Google says its token was issued to.
 
     Where registration is turned off, that difference decides where the rule is
-    enforced. In front of Google this server is the registrar, so it serves only
-    the client it holds, which is exactly the one an operator pastes into a
-    caller they provisioned. Elsewhere the provider is the registrar and this
-    server cannot stop it, so it refuses the resulting tokens instead.
+    enforced. In front of Google, this server is the registrar: `OwnClientOnlyProxy`
+    refuses every client through `/authorize` and `/token`, even the one it holds
+    itself, since `GoogleProvider` would otherwise synthesize a public client for
+    it. Only a caller holding a token Google issued directly gets through.
+    Against a provider that registers clients itself, this server has no such
+    lever, so it checks tokens instead: only one issued to this deployment's
+    client is accepted.
 
     Returns:
         An auth provider, or None when client authentication is disabled.
