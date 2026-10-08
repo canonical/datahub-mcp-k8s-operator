@@ -14,8 +14,10 @@ that registers callers itself and forwards them upstream. See `_auth_provider`.
 A caller can self-register on the spot and come away with a client nobody provisioned.
 Or an operator registers it up front and pastes the credentials in by presenting
 the client this deployment already owns, so nothing needs to be configured here.
-Turning registration off leaves only the second kind, which is how a deployment
-is limited to the callers an operator set up. See `_client_registration_enabled`.
+Turning registration off withdraws both: the proxy refuses every client
+through `/authorize` and `/token`, even this deployment's own. What survives
+is the caller pointed directly at Google, described next.
+See `_client_registration_enabled`.
 
 The proxy only serves callers that discover it. A caller configured by hand is
 pointed at Google's own endpoints instead and arrives holding a token Google
@@ -32,9 +34,9 @@ and the variables below, from the `oauth` relation:
     MCP_AUTH_CLIENT_ID            This deployment's OAuth client.
     MCP_AUTH_CLIENT_SECRET        Credential for calling the validation endpoint.
     MCP_AUTH_BASE_URL             Public URL of this server, advertised to clients.
-    MCP_AUTH_CLIENT_REGISTRATION  "false" to serve only callers presenting this
-                                  deployment's own client. Defaults to allowing
-                                  callers to register their own.
+    MCP_AUTH_CLIENT_REGISTRATION  "false" to refuse callers that have not been
+                                  set up by an operator ahead of time. Defaults
+                                  to allowing callers to register their own.
 """
 
 import os
@@ -260,29 +262,22 @@ class DirectGoogleTokenProxy(GoogleProvider):  # pylint: disable=too-many-ancest
 
 
 class OwnClientOnlyProxy(DirectGoogleTokenProxy):  # pylint: disable=too-many-ancestors
-    """OAuth proxy that resolves no client but the one this deployment holds.
+    """OAuth proxy that refuses every client once registration is withdrawn.
 
-    Withdrawing the registration endpoint stops a caller from obtaining a client
-    it does not have, but it says nothing about the ones already handed out. The
-    proxy keeps the registrations it issued, and `/authorize` and `/token` never
-    consult the registration switch, so a caller that registered while it was on
-    keeps working afterwards for as long as that record survives.
-
-    Refusing to resolve any other client closes that. Every route that acts on
-    behalf of a client looks it up here first: the authorize handler directly,
-    and the token endpoint through the client authentication that guards it, so
-    a code exchange and a refresh are both refused along with the rest.
-
-    The inherited check on a token Google issued needs nothing added: it already
-    admits only the client this deployment owns, which is the same rule read off
-    the token rather than off the registration.
+    `/authorize` and `/token` resolve clients through get_client(), not the
+    registration switch, so a stale registration survives the switch unless
+    get_client() refuses everything — including this deployment's own
+    client_id, which GoogleProvider would otherwise synthesize a public,
+    secret-less client for. A hand-configured caller is unaffected: it
+    holds a token Google minted directly, checked by the inherited
+    Google-issued-token path instead.
     """
 
     def __init__(self, *, client_id: str, **kwargs):
         """Construct.
 
         Args:
-            client_id: This deployment's own OAuth client, the only one served.
+            client_id: This deployment's own OAuth client.
             kwargs: Passed through to GoogleProvider.
 
         Raises:
@@ -290,7 +285,6 @@ class OwnClientOnlyProxy(DirectGoogleTokenProxy):  # pylint: disable=too-many-an
                 which would leave it registering callers this refuses to serve.
         """
         super().__init__(client_id=client_id, **kwargs)
-        self._own_client_id = client_id
         # The proxy turns registration on unconditionally, so it is withdrawn
         # here. Both the route and the metadata entry advertising it are built
         # from these options at startup, so a caller is told registration is
@@ -301,18 +295,15 @@ class OwnClientOnlyProxy(DirectGoogleTokenProxy):  # pylint: disable=too-many-an
         options.enabled = False
 
     async def get_client(self, client_id: str) -> Optional[Any]:
-        """Return the registered client with this identifier, if it is ours.
+        """Return None: no client resolves while registration is withdrawn.
 
         Args:
             client_id: The client an incoming request claims to be.
 
         Returns:
-            The client when it is this deployment's own, otherwise None, which
-            the routes above report as an invalid client.
+            None, always — which the routes above report as an invalid client.
         """
-        if client_id != self._own_client_id:
-            return None
-        return await super().get_client(client_id)
+        return None
 
 
 class CheckedIntrospectionVerifier(IntrospectionTokenVerifier):
@@ -447,10 +438,13 @@ def _auth_provider():
     strength of the client Google says its token was issued to.
 
     Where registration is turned off, that difference decides where the rule is
-    enforced. In front of Google this server is the registrar, so it serves only
-    the client it holds, which is exactly the one an operator pastes into a
-    caller they provisioned. Elsewhere the provider is the registrar and this
-    server cannot stop it, so it refuses the resulting tokens instead.
+    enforced. In front of Google, this server is the registrar: `OwnClientOnlyProxy`
+    refuses every client through `/authorize` and `/token`, even the one it holds
+    itself, since `GoogleProvider` would otherwise synthesize a public client for
+    it. Only a caller holding a token Google issued directly gets through.
+    Against a provider that registers clients itself, this server has no such
+    lever, so it checks tokens instead: only one issued to this deployment's
+    client is accepted.
 
     Returns:
         An auth provider, or None when client authentication is disabled.

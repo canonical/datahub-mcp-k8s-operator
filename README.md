@@ -107,18 +107,16 @@ ClientID Metadata Documents (CIMD), where a caller names a URL it hosts instead 
 
 By default a caller may obtain an OAuth client of its own. That is how an MCP client on a developer's machine connects with nothing configured but the URL, and it means anyone who can reach the endpoint and authenticate at the identity provider can call the tools.
 
-`enable-client-registration=false` withdraws that, leaving only the callers an operator set up in advance by giving them this deployment's own client ID and secret:
+`enable-client-registration=false` withdraws that, leaving only the callers an operator set up in advance:
 
 ```sh
 juju config datahub-mcp-k8s enable-client-registration=false
 ```
 
-A caller configured that way needs no charm configuration of its own. It presents the client this deployment already holds, which the server recognises without a registration.
+Where the rule is enforced, and what a pre-registered caller needs, follows from who does the registering:
 
-Where the rule is enforced follows from who does the registering:
-
-- **Fronting Google**, this server is the registrar. It stops serving `/register`, stops advertising it in the authorization server metadata, and resolves no client but its own, so callers that registered while it was on are cut off along with new ones. A caller holding a Google token is held to the same rule by the client Google names on it.
-- **Against a provider that registers clients itself**, registration happens at the provider and the charm cannot stop it. It instead refuses any token whose `client_id` or `azp` claim is not this deployment's client.
+- **Fronting Google**, this server is the registrar, and it withdraws registration rather than narrowing it: it stops serving `/register`, stops advertising it in the authorization server metadata, and resolves no client through `/authorize` or `/token` at all — not even its own, since `GoogleProvider` would otherwise synthesize one for it. Presenting this deployment's client ID and secret there no longer works, and callers that registered while registration was on are cut off along with new ones. What survives is a caller configured against Google's own endpoints directly, holding a token Google issued to this deployment's client.
+- **Against a provider that registers clients itself**, registration happens at the provider and the charm cannot stop it. It instead refuses any token whose `client_id` or `azp` claim is not this deployment's client, which is exactly the one an operator pastes into a caller they provisioned by hand.
 
 #### Gemini Enterprise
 
