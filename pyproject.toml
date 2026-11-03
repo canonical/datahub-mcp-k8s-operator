@@ -39,7 +39,7 @@ lint = [
     "isort==8.0.1",
     "pep8-naming==0.15.1",
     "pydocstyle==6.3.0",
-    "pylint==4.0.5",
+    "pylint==4.0.9",
     "pyproject-flake8==7.0.0",
     "pytest==9.0.3",
     "types-PyYAML==6.0.12.20260408",
